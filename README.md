@@ -1,7 +1,7 @@
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./assets/brand-dark.png">
   <source media="(prefers-color-scheme: light)" srcset="./assets/brand-light.png">
-  <img src="./assets/brand-light.png" align="right" width="104" alt="SteepAwake green teacup">
+  <img src="./assets/brand-light.png" align="right" width="80" alt="SteepAwake green teacup">
 </picture>
 
 # SteepAwake
@@ -28,23 +28,35 @@ to choose 30 minutes, 1 hour, 2 hours, 4 hours, 6 hours, or Indefinitely.
 The same menu contains a **Start with Windows** checkbox. It uses the current
 user's startup registry entry and does not cause a User Account Control prompt.
 
+Two optional checkboxes apply only while an awake session is active:
+
+- **Keep display on while awake** temporarily disables the display timeout.
+- **Keep awake with lid closed** temporarily changes the lid-close action to
+  **Do nothing**. The built-in display still turns off when the lid closes.
+  Keep the computer's vents clear when using it closed.
+
+Both options are off by default. Normal display timeout and lid-close behavior
+remain unchanged unless you enable them.
+
 ## How it works
 
 When an awake session starts, SteepAwake:
 
 1. reads the active Windows power scheme and saves its plugged-in and battery
-   `Sleep after` values;
-2. changes both values to `0`, which is Windows' **Never** setting;
-3. restores the saved values when the timer expires, Normal sleep is selected,
+   sleep, display, and lid-close values;
+2. changes `Sleep after` to `0`, which is Windows' **Never** setting, and
+   applies either optional preference;
+3. restores every saved value when the timer expires, Normal sleep is selected,
    or the app exits.
 
 This changes the actual power policy through Windows' `PowrProf` API. It does
 not create an execution request, so `powercfg /requests` normally continues to
 show `None`.
 
-SteepAwake does not change display timeout, manual sleep, lid-close behavior,
-critical-battery actions, router behavior, or application/server idle
-timeouts.
+SteepAwake does not block manual sleep or change critical-battery actions,
+router behavior, or application/server idle timeouts. The optional display and
+lid settings affect only the active Windows power policy and are restored after
+the awake session.
 
 Preferences are stored in `%LOCALAPPDATA%\SteepAwake`. The installer places
 the app in `%LOCALAPPDATA%\Programs\SteepAwake`.

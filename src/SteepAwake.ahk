@@ -7,13 +7,13 @@
 ;@Ahk2Exe-AddResource ..\assets\indefinite-light.ico, 206
 ;@Ahk2Exe-SetCompanyName smkwray
 ;@Ahk2Exe-SetDescription Keep Windows awake from the tray
-;@Ahk2Exe-SetFileVersion 0.1.0
+;@Ahk2Exe-SetFileVersion 0.2.0
 ;@Ahk2Exe-SetInternalName SteepAwake
 ;@Ahk2Exe-SetCopyright Copyright (c) 2026 Shane Wray
 ;@Ahk2Exe-SetName SteepAwake
 ;@Ahk2Exe-SetOrigFilename SteepAwake.exe
 ;@Ahk2Exe-SetProductName SteepAwake
-;@Ahk2Exe-SetProductVersion 0.1.0
+;@Ahk2Exe-SetProductVersion 0.2.0
 
 #Requires AutoHotkey v2.0
 #SingleInstance Force
@@ -29,8 +29,14 @@ global SessionActive := false
 global SessionPlan := ""
 global NormalAC := 0
 global NormalDC := 0
+global NormalDisplayAC := -1
+global NormalDisplayDC := -1
+global NormalLidAC := -1
+global NormalLidDC := -1
 global SessionExpiry := ""
 global SessionLabel := "Normal sleep"
+global KeepDisplayOn := false
+global KeepAwakeWithLidClosed := false
 global LastIconKey := ""
 global IconResources := Map(
     "normal-dark", 201,
@@ -45,6 +51,7 @@ DirCreate(StateDirectory)
 if HasArgument("exit")
     ExitApp()
 
+LoadPreferences()
 BuildTrayMenu()
 LoadSession()
 SetTimer(CheckExpiration, 5000)
@@ -61,6 +68,9 @@ BuildTrayMenu() {
     A_TrayMenu.Add("4 hours", Select4Hours)
     A_TrayMenu.Add("6 hours", Select6Hours)
     A_TrayMenu.Add("Indefinitely", SelectIndefinitely)
+    A_TrayMenu.Add()
+    A_TrayMenu.Add("Keep display on while awake", ToggleKeepDisplayOn)
+    A_TrayMenu.Add("Keep awake with lid closed", ToggleKeepAwakeWithLidClosed)
     A_TrayMenu.Add()
     A_TrayMenu.Add("Start with Windows", ToggleStartup)
     A_TrayMenu.Add()
@@ -99,21 +109,26 @@ SelectIndefinitely(*) {
 
 StartSession(minutes, label) {
     global SessionActive, SessionPlan, NormalAC, NormalDC
+    global NormalDisplayAC, NormalDisplayDC, NormalLidAC, NormalLidDC
     global SessionExpiry, SessionLabel
 
     try {
         if !SessionActive {
-            values := ReadCurrentSleepValues()
+            values := ReadCurrentPowerValues()
             SessionPlan := values.Plan
             NormalAC := values.AC
             NormalDC := values.DC
+            NormalDisplayAC := values.DisplayAC
+            NormalDisplayDC := values.DisplayDC
+            NormalLidAC := values.LidAC
+            NormalLidDC := values.LidDC
         }
 
         SessionActive := true
         SessionExpiry := minutes ? DateAdd(A_Now, minutes, "Minutes") : ""
         SessionLabel := label
         SaveSession()
-        SetSleepValues(SessionPlan, 0, 0)
+        ApplySessionPolicy()
         RefreshTray()
 
         message := minutes
@@ -129,11 +144,16 @@ StartSession(minutes, label) {
 
 RestoreNormal(showNotice := false) {
     global SessionActive, SessionPlan, NormalAC, NormalDC
+    global NormalDisplayAC, NormalDisplayDC, NormalLidAC, NormalLidDC
     global SessionExpiry, SessionLabel
 
     if SessionActive && SessionPlan {
         try {
             SetSleepValues(SessionPlan, NormalAC, NormalDC)
+            if NormalDisplayAC >= 0 && NormalDisplayDC >= 0
+                SetDisplayValues(SessionPlan, NormalDisplayAC, NormalDisplayDC)
+            if NormalLidAC >= 0 && NormalLidDC >= 0
+                SetLidValues(SessionPlan, NormalLidAC, NormalLidDC)
         } catch Error as err {
             MsgBox("Could not restore the normal sleep policy.`n`n" err.Message,
                 AppName, "Iconx")
@@ -145,6 +165,10 @@ RestoreNormal(showNotice := false) {
     SessionPlan := ""
     NormalAC := 0
     NormalDC := 0
+    NormalDisplayAC := -1
+    NormalDisplayDC := -1
+    NormalLidAC := -1
+    NormalLidDC := -1
     SessionExpiry := ""
     SessionLabel := "Normal sleep"
     SaveSession()
@@ -169,6 +193,7 @@ CheckExpiration() {
 
 LoadSession() {
     global SessionActive, SessionPlan, NormalAC, NormalDC
+    global NormalDisplayAC, NormalDisplayDC, NormalLidAC, NormalLidDC
     global SessionExpiry, SessionLabel
 
     SessionActive := Integer(IniRead(StateFile, "Session", "Active", "0")) = 1
@@ -180,6 +205,12 @@ LoadSession() {
     SessionPlan := IniRead(StateFile, "Session", "Plan", "")
     NormalAC := Integer(IniRead(StateFile, "Session", "NormalAC", "0"))
     NormalDC := Integer(IniRead(StateFile, "Session", "NormalDC", "0"))
+    NormalDisplayAC := Integer(IniRead(
+        StateFile, "Session", "NormalDisplayAC", "-1"))
+    NormalDisplayDC := Integer(IniRead(
+        StateFile, "Session", "NormalDisplayDC", "-1"))
+    NormalLidAC := Integer(IniRead(StateFile, "Session", "NormalLidAC", "-1"))
+    NormalLidDC := Integer(IniRead(StateFile, "Session", "NormalLidDC", "-1"))
     SessionExpiry := IniRead(StateFile, "Session", "Expiry", "")
     SessionLabel := IniRead(StateFile, "Session", "Label", "Indefinitely")
 
@@ -194,7 +225,15 @@ LoadSession() {
     }
 
     try {
-        SetSleepValues(SessionPlan, 0, 0)
+        if NormalDisplayAC < 0 || NormalDisplayDC < 0 {
+            values := ReadCurrentPowerValues()
+            NormalDisplayAC := values.DisplayAC
+            NormalDisplayDC := values.DisplayDC
+            NormalLidAC := values.LidAC
+            NormalLidDC := values.LidDC
+            SaveSession()
+        }
+        ApplySessionPolicy()
         RefreshTray()
     } catch Error as err {
         MsgBox("Could not resume the saved " AppName " session.`n`n" err.Message,
@@ -205,12 +244,17 @@ LoadSession() {
 
 SaveSession() {
     global SessionActive, SessionPlan, NormalAC, NormalDC
+    global NormalDisplayAC, NormalDisplayDC, NormalLidAC, NormalLidDC
     global SessionExpiry, SessionLabel
 
     IniWrite(SessionActive ? 1 : 0, StateFile, "Session", "Active")
     IniWrite(SessionPlan, StateFile, "Session", "Plan")
     IniWrite(NormalAC, StateFile, "Session", "NormalAC")
     IniWrite(NormalDC, StateFile, "Session", "NormalDC")
+    IniWrite(NormalDisplayAC, StateFile, "Session", "NormalDisplayAC")
+    IniWrite(NormalDisplayDC, StateFile, "Session", "NormalDisplayDC")
+    IniWrite(NormalLidAC, StateFile, "Session", "NormalLidAC")
+    IniWrite(NormalLidDC, StateFile, "Session", "NormalLidDC")
     IniWrite(SessionExpiry, StateFile, "Session", "Expiry")
     IniWrite(SessionLabel, StateFile, "Session", "Label")
 }
@@ -224,6 +268,7 @@ RefreshTray() {
 
     selected := SessionActive ? SessionLabel : "Normal sleep"
     try A_TrayMenu.Check(selected)
+    RefreshOptionChecks()
     RefreshStartupCheck()
 
     if SessionActive {
@@ -273,6 +318,91 @@ HandleSettingChange(*) {
     RefreshTray()
 }
 
+LoadPreferences() {
+    global KeepDisplayOn, KeepAwakeWithLidClosed
+
+    KeepDisplayOn := Integer(IniRead(
+        StateFile, "Preferences", "KeepDisplayOn", "0")) = 1
+    KeepAwakeWithLidClosed := Integer(IniRead(
+        StateFile, "Preferences", "KeepAwakeWithLidClosed", "0")) = 1
+}
+
+SavePreferences() {
+    IniWrite(KeepDisplayOn ? 1 : 0,
+        StateFile, "Preferences", "KeepDisplayOn")
+    IniWrite(KeepAwakeWithLidClosed ? 1 : 0,
+        StateFile, "Preferences", "KeepAwakeWithLidClosed")
+}
+
+ToggleKeepDisplayOn(*) {
+    global KeepDisplayOn
+
+    try {
+        enabled := !KeepDisplayOn
+        if SessionActive {
+            if enabled
+                SetDisplayValues(SessionPlan, 0, 0)
+            else
+                SetDisplayValues(SessionPlan, NormalDisplayAC, NormalDisplayDC)
+        }
+        KeepDisplayOn := enabled
+        SavePreferences()
+        RefreshOptionChecks()
+        TrayTip(enabled
+            ? "The display will stay on during awake sessions."
+            : "Normal display timeout will be used.",
+            AppName, 1)
+    } catch Error as err {
+        MsgBox("Could not change the display option.`n`n" err.Message,
+            AppName, "Iconx")
+    }
+}
+
+ToggleKeepAwakeWithLidClosed(*) {
+    global KeepAwakeWithLidClosed
+
+    try {
+        enabled := !KeepAwakeWithLidClosed
+        if enabled && !SessionActive {
+            values := ReadCurrentPowerValues()
+            if values.LidAC < 0 || values.LidDC < 0
+                throw Error("This computer does not expose a lid-close setting.")
+        }
+        if SessionActive {
+            if NormalLidAC < 0 || NormalLidDC < 0
+                throw Error("This computer does not expose a lid-close setting.")
+            if enabled
+                SetLidValues(SessionPlan, 0, 0)
+            else
+                SetLidValues(SessionPlan, NormalLidAC, NormalLidDC)
+        }
+        KeepAwakeWithLidClosed := enabled
+        SavePreferences()
+        RefreshOptionChecks()
+        TrayTip(enabled
+            ? "Lid close will not sleep Windows during awake sessions. Keep vents clear."
+            : "Normal lid-close behavior will be used.",
+            AppName, 1)
+    } catch Error as err {
+        MsgBox("Could not change the lid-close option.`n`n" err.Message,
+            AppName, "Iconx")
+    }
+}
+
+RefreshOptionChecks() {
+    if KeepDisplayOn {
+        try A_TrayMenu.Check("Keep display on while awake")
+    } else {
+        try A_TrayMenu.Uncheck("Keep display on while awake")
+    }
+
+    if KeepAwakeWithLidClosed {
+        try A_TrayMenu.Check("Keep awake with lid closed")
+    } else {
+        try A_TrayMenu.Uncheck("Keep awake with lid closed")
+    }
+}
+
 ToggleStartup(*) {
     try {
         if IsStartupEnabled() {
@@ -318,30 +448,81 @@ HasArgument(expected) {
     return false
 }
 
-ReadCurrentSleepValues() {
+ReadCurrentPowerValues() {
     plan := GetActiveScheme()
     schemeGuid := GuidBuffer(plan)
     sleepGroupGuid := GuidBuffer("{238c9fa8-0aad-41ed-83f4-97be242c8f20}")
     sleepSettingGuid := GuidBuffer("{29f6c1db-86da-48c5-9fdb-f2b67b1f44da}")
+    displayGroupGuid := GuidBuffer("{7516b95f-f776-4464-8c53-06167f40cc99}")
+    displaySettingGuid := GuidBuffer("{3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e}")
+    lidGroupGuid := GuidBuffer("{4f971e89-eebd-4455-a8de-9e59040e7347}")
+    lidSettingGuid := GuidBuffer("{5ca83367-6e45-459f-a27b-476b1d01c936}")
+
+    lidAC := -1
+    lidDC := -1
+    try {
+        lidAC := ReadPowerValue("PowerReadACValueIndex", schemeGuid,
+            lidGroupGuid, lidSettingGuid)
+        lidDC := ReadPowerValue("PowerReadDCValueIndex", schemeGuid,
+            lidGroupGuid, lidSettingGuid)
+    } catch {
+    }
 
     return {
         Plan: plan,
         AC: ReadPowerValue("PowerReadACValueIndex", schemeGuid,
             sleepGroupGuid, sleepSettingGuid),
         DC: ReadPowerValue("PowerReadDCValueIndex", schemeGuid,
-            sleepGroupGuid, sleepSettingGuid)
+            sleepGroupGuid, sleepSettingGuid),
+        DisplayAC: ReadPowerValue("PowerReadACValueIndex", schemeGuid,
+            displayGroupGuid, displaySettingGuid),
+        DisplayDC: ReadPowerValue("PowerReadDCValueIndex", schemeGuid,
+            displayGroupGuid, displaySettingGuid),
+        LidAC: lidAC,
+        LidDC: lidDC
+    }
+}
+
+ApplySessionPolicy() {
+    SetSleepValues(SessionPlan, 0, 0)
+    if KeepDisplayOn
+        SetDisplayValues(SessionPlan, 0, 0)
+    if KeepAwakeWithLidClosed {
+        if NormalLidAC < 0 || NormalLidDC < 0
+            throw Error("This computer does not expose a lid-close setting.")
+        SetLidValues(SessionPlan, 0, 0)
     }
 }
 
 SetSleepValues(plan, acSeconds, dcSeconds) {
-    schemeGuid := GuidBuffer(plan)
-    sleepGroupGuid := GuidBuffer("{238c9fa8-0aad-41ed-83f4-97be242c8f20}")
-    sleepSettingGuid := GuidBuffer("{29f6c1db-86da-48c5-9fdb-f2b67b1f44da}")
+    SetPowerSettingValues(plan,
+        "{238c9fa8-0aad-41ed-83f4-97be242c8f20}",
+        "{29f6c1db-86da-48c5-9fdb-f2b67b1f44da}",
+        acSeconds, dcSeconds)
+}
 
+SetDisplayValues(plan, acSeconds, dcSeconds) {
+    SetPowerSettingValues(plan,
+        "{7516b95f-f776-4464-8c53-06167f40cc99}",
+        "{3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e}",
+        acSeconds, dcSeconds)
+}
+
+SetLidValues(plan, acValue, dcValue) {
+    SetPowerSettingValues(plan,
+        "{4f971e89-eebd-4455-a8de-9e59040e7347}",
+        "{5ca83367-6e45-459f-a27b-476b1d01c936}",
+        acValue, dcValue)
+}
+
+SetPowerSettingValues(plan, groupGuidText, settingGuidText, acValue, dcValue) {
+    schemeGuid := GuidBuffer(plan)
+    groupGuid := GuidBuffer(groupGuidText)
+    settingGuid := GuidBuffer(settingGuidText)
     WritePowerValue("PowerWriteACValueIndex", schemeGuid,
-        sleepGroupGuid, sleepSettingGuid, acSeconds)
+        groupGuid, settingGuid, acValue)
     WritePowerValue("PowerWriteDCValueIndex", schemeGuid,
-        sleepGroupGuid, sleepSettingGuid, dcSeconds)
+        groupGuid, settingGuid, dcValue)
 
     result := DllCall("PowrProf\PowerSetActiveScheme",
         "Ptr", 0, "Ptr", schemeGuid.Ptr, "UInt")

@@ -55,6 +55,12 @@ Assert-True ($source -match 'StartSession\(360,\s*"6 hours"\)') 'The 6-hour sess
 Assert-True ($source -match 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run') 'Per-user startup support is missing.'
 Assert-True ($source -match 'PowerWriteACValueIndex') 'AC power-policy write is missing.'
 Assert-True ($source -match 'PowerWriteDCValueIndex') 'DC power-policy write is missing.'
+Assert-True ($source -match 'Keep display on while awake') 'Display preference is missing.'
+Assert-True ($source -match 'Keep awake with lid closed') 'Lid-close preference is missing.'
+Assert-True ($source -match '3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e') 'Display timeout policy is missing.'
+Assert-True ($source -match '5ca83367-6e45-459f-a27b-476b1d01c936') 'Lid-close policy is missing.'
+Assert-True ($source -match 'global KeepDisplayOn := false') 'Display preference must default off.'
+Assert-True ($source -match 'global KeepAwakeWithLidClosed := false') 'Lid preference must default off.'
 Assert-True ($source -notmatch 'A_ComSpec|RunWait|\.Exec\(') 'The app must not launch command shells.'
 
 $installer = Get-Content -LiteralPath $installerPath -Raw
@@ -77,4 +83,4 @@ if ($failures.Count) {
     exit 1
 }
 
-"Smoke checks passed: $($iconNames.Count) icons, source syntax, startup, installer, and power-policy wiring."
+"Smoke checks passed: $($iconNames.Count) icons, source syntax, startup, installer, and sleep/display/lid policy wiring."

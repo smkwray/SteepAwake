@@ -5,15 +5,15 @@
 ;@Ahk2Exe-AddResource ..\assets\normal-light.ico, 204
 ;@Ahk2Exe-AddResource ..\assets\timed-light.ico, 205
 ;@Ahk2Exe-AddResource ..\assets\indefinite-light.ico, 206
-;@Ahk2Exe-SetProp CompanyName, smkwray
-;@Ahk2Exe-SetProp Description, A friendly Windows tray app that prevents idle sleep
-;@Ahk2Exe-SetProp FileVersion, 0.1.0
-;@Ahk2Exe-SetProp InternalName, SteepAwake
-;@Ahk2Exe-SetProp Copyright, Copyright (c) 2026 Shane Wray
-;@Ahk2Exe-SetProp Name, SteepAwake
-;@Ahk2Exe-SetProp OrigFilename, SteepAwake.exe
-;@Ahk2Exe-SetProp ProductName, SteepAwake
-;@Ahk2Exe-SetProp ProductVersion, 0.1.0
+;@Ahk2Exe-SetCompanyName smkwray
+;@Ahk2Exe-SetDescription Keep Windows awake from the tray
+;@Ahk2Exe-SetFileVersion 0.1.0
+;@Ahk2Exe-SetInternalName SteepAwake
+;@Ahk2Exe-SetCopyright Copyright (c) 2026 Shane Wray
+;@Ahk2Exe-SetName SteepAwake
+;@Ahk2Exe-SetOrigFilename SteepAwake.exe
+;@Ahk2Exe-SetProductName SteepAwake
+;@Ahk2Exe-SetProductVersion 0.1.0
 
 #Requires AutoHotkey v2.0
 #SingleInstance Force

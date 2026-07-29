@@ -5,7 +5,13 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $sourcePath = Join-Path $projectRoot 'src\SteepAwake.ahk'
 $generatorPath = Join-Path $projectRoot 'tools\GenerateIcons.ps1'
 $installerPath = Join-Path $projectRoot 'installer\SteepAwake.iss'
-$autoHotkeyPath = 'C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe'
+$autoHotkeyPath = if ($env:AUTOHOTKEY_PATH) {
+    $env:AUTOHOTKEY_PATH
+} elseif (Test-Path -LiteralPath (Join-Path $projectRoot '.tools\AutoHotkey\AutoHotkey64.exe')) {
+    Join-Path $projectRoot '.tools\AutoHotkey\AutoHotkey64.exe'
+} else {
+    'C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe'
+}
 $failures = [System.Collections.Generic.List[string]]::new()
 
 function Assert-True {

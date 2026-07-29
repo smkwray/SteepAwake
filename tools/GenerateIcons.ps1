@@ -175,3 +175,10 @@ foreach ($theme in @('Dark', 'Light')) {
             -Theme $theme
     }
 }
+
+[IO.File]::WriteAllBytes(
+    (Join-Path $outputDirectory 'brand-dark.png'),
+    [byte[]](New-TeacupPng -Size 256 -Mode Indefinite -Theme Dark))
+[IO.File]::WriteAllBytes(
+    (Join-Path $outputDirectory 'brand-light.png'),
+    [byte[]](New-TeacupPng -Size 256 -Mode Indefinite -Theme Light))

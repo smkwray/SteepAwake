@@ -1,17 +1,27 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./assets/brand-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="./assets/brand-light.png">
+  <img src="./assets/brand-light.png" align="right" width="104" alt="SteepAwake green teacup">
+</picture>
+
 # SteepAwake
 
-SteepAwake is a small Windows tray app for temporarily preventing idle sleep.
-Its teacup icon makes the current state visible at a glance: empty gray means
-normal sleep, half-full amber means a timed session, and full green means awake
-indefinitely.
+Keep Windows awake for 30 minutes, 1, 2, 4, or 6 hours—or indefinitely—from
+one quiet tray menu. When you are done, SteepAwake restores the sleep settings
+you already had.
 
-## Install
+## Download
 
-Release builds provide two choices:
-
-- **SteepAwake-Setup.exe** installs for the current user, optionally starts
+- **[SteepAwake-Setup.exe](https://github.com/smkwray/SteepAwake/releases/latest/download/SteepAwake-Setup.exe)**
+  is the recommended installer. It installs for the current user, can start
   SteepAwake with Windows, and requires no administrator privileges.
-- **SteepAwake.exe** is a portable single-file build.
+- **[SteepAwake.exe](https://github.com/smkwray/SteepAwake/releases/latest/download/SteepAwake.exe)**
+  is the portable single-file build.
+
+Both files and their SHA-256 checksums are available on the
+[Releases page](https://github.com/smkwray/SteepAwake/releases).
+The binaries are not code-signed, so Windows SmartScreen may ask you to confirm
+the first launch.
 
 Fresh installations start in **Normal sleep** mode. Right-click the tray icon
 to choose 30 minutes, 1 hour, 2 hours, 4 hours, 6 hours, or Indefinitely.
@@ -49,8 +59,15 @@ Requires [AutoHotkey v2](https://www.autohotkey.com/):
 
 ## Build
 
-The build requires the official AutoHotkey `Ahk2Exe` compiler. Inno Setup 6 is
-optional; when present it also produces the per-user installer.
+GitHub Actions builds both release files from pinned, checksum-verified
+AutoHotkey, Ahk2Exe, and Inno Setup versions whenever a `v*` tag is pushed.
+For a local build, first prepare the same tools:
+
+```powershell
+pwsh -NoProfile -File .\scripts\setup-build-tools.ps1
+```
+
+Then build:
 
 ```powershell
 pwsh -NoProfile -File .\scripts\build.ps1

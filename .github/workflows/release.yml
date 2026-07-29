@@ -17,7 +17,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Prepare pinned build tools
         shell: pwsh
@@ -47,7 +47,7 @@ jobs:
         run: .\tests\ReleaseSmoke.ps1
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: SteepAwake-${{ github.sha }}
           path: |

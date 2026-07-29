@@ -1,0 +1,7 @@
+.worktrees/
+dist/
+build/
+*.log
+*.zip
+.staging/
+.tools/

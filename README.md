@@ -42,21 +42,28 @@ remain unchanged unless you enable them.
 
 When an awake session starts, SteepAwake:
 
-1. reads the active Windows power scheme and saves its plugged-in and battery
-   sleep, display, and lid-close values;
-2. changes `Sleep after` to `0`, which is Windows' **Never** setting, and
-   applies either optional preference;
-3. restores every saved value when the timer expires, Normal sleep is selected,
-   or the app exits.
+1. creates a Windows system power request that prevents automatic sleep without
+   changing the power plan's sleep timeout;
+2. adds a display power request if that option is enabled and temporarily
+   changes the lid-close action only if its separate option is enabled;
+3. releases the requests and restores any changed lid setting when the timer
+   expires, Normal sleep is selected, or the app exits.
 
-This changes the actual power policy through Windows' `PowrProf` API. It does
-not create an execution request, so `powercfg /requests` normally continues to
-show `None`.
+The request is scoped to the running app and appears in `powercfg /requests`
+while an awake session is active. Normal sleep and display timeouts are never
+rewritten. When upgrading from version 0.2, SteepAwake first restores any power
+policy saved by an active legacy session.
+
+On Modern Standby laptops, Windows can limit application power requests after
+the display turns off while running on battery. Timed and indefinite sessions
+are therefore best-effort on battery; plugged-in requests remain active until
+SteepAwake clears them. See Microsoft's
+[Modern Standby guidance](https://learn.microsoft.com/windows-hardware/design/device-experiences/prepare-software-for-modern-standby).
 
 SteepAwake does not block manual sleep or change critical-battery actions,
-router behavior, or application/server idle timeouts. The optional display and
-lid settings affect only the active Windows power policy and are restored after
-the awake session.
+router behavior, or application/server idle timeouts. The optional lid setting
+affects only the active Windows power policy and is restored after the awake
+session.
 
 Preferences are stored in `%LOCALAPPDATA%\SteepAwake`. The installer places
 the app in `%LOCALAPPDATA%\Programs\SteepAwake`.

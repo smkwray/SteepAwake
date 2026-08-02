@@ -27,6 +27,7 @@ global StartupKey := "HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
 global StartupValueName := "SteepAwake"
 global SessionActive := false
 global SessionPlan := ""
+global SessionUsesLegacyPolicy := false
 global NormalAC := 0
 global NormalDC := 0
 global NormalDisplayAC := -1
@@ -37,6 +38,9 @@ global SessionExpiry := ""
 global SessionLabel := "Normal sleep"
 global KeepDisplayOn := false
 global KeepAwakeWithLidClosed := false
+global PowerRequestHandle := 0
+global PowerRequestSystemSet := false
+global PowerRequestDisplaySet := false
 global LastIconKey := ""
 global IconResources := Map(
     "normal-dark", 201,
@@ -110,7 +114,7 @@ SelectIndefinitely(*) {
 StartSession(minutes, label) {
     global SessionActive, SessionPlan, NormalAC, NormalDC
     global NormalDisplayAC, NormalDisplayDC, NormalLidAC, NormalLidDC
-    global SessionExpiry, SessionLabel
+    global SessionExpiry, SessionLabel, SessionUsesLegacyPolicy
 
     try {
         if !SessionActive {
@@ -122,6 +126,7 @@ StartSession(minutes, label) {
             NormalDisplayDC := values.DisplayDC
             NormalLidAC := values.LidAC
             NormalLidDC := values.LidDC
+            SessionUsesLegacyPolicy := false
         }
 
         SessionActive := true
@@ -145,24 +150,30 @@ StartSession(minutes, label) {
 RestoreNormal(showNotice := false) {
     global SessionActive, SessionPlan, NormalAC, NormalDC
     global NormalDisplayAC, NormalDisplayDC, NormalLidAC, NormalLidDC
-    global SessionExpiry, SessionLabel
+    global SessionExpiry, SessionLabel, SessionUsesLegacyPolicy
 
     if SessionActive && SessionPlan {
         try {
-            SetSleepValues(SessionPlan, NormalAC, NormalDC)
-            if NormalDisplayAC >= 0 && NormalDisplayDC >= 0
-                SetDisplayValues(SessionPlan, NormalDisplayAC, NormalDisplayDC)
+            if SessionUsesLegacyPolicy {
+                SetSleepValues(SessionPlan, NormalAC, NormalDC)
+                if NormalDisplayAC >= 0 && NormalDisplayDC >= 0
+                    SetDisplayValues(SessionPlan, NormalDisplayAC,
+                        NormalDisplayDC)
+            }
             if NormalLidAC >= 0 && NormalLidDC >= 0
                 SetLidValues(SessionPlan, NormalLidAC, NormalLidDC)
         } catch Error as err {
+            ReleasePowerRequest()
             MsgBox("Could not restore the normal sleep policy.`n`n" err.Message,
                 AppName, "Iconx")
             return false
         }
     }
 
+    ReleasePowerRequest()
     SessionActive := false
     SessionPlan := ""
+    SessionUsesLegacyPolicy := false
     NormalAC := 0
     NormalDC := 0
     NormalDisplayAC := -1
@@ -194,7 +205,7 @@ CheckExpiration() {
 LoadSession() {
     global SessionActive, SessionPlan, NormalAC, NormalDC
     global NormalDisplayAC, NormalDisplayDC, NormalLidAC, NormalLidDC
-    global SessionExpiry, SessionLabel
+    global SessionExpiry, SessionLabel, SessionUsesLegacyPolicy
 
     SessionActive := Integer(IniRead(StateFile, "Session", "Active", "0")) = 1
     if !SessionActive {
@@ -213,6 +224,8 @@ LoadSession() {
     NormalLidDC := Integer(IniRead(StateFile, "Session", "NormalLidDC", "-1"))
     SessionExpiry := IniRead(StateFile, "Session", "Expiry", "")
     SessionLabel := IniRead(StateFile, "Session", "Label", "Indefinitely")
+    SessionUsesLegacyPolicy := Integer(IniRead(
+        StateFile, "Session", "LegacyPowerPolicy", "1")) = 1
 
     if !SessionPlan {
         RestoreNormal(false)
@@ -233,6 +246,14 @@ LoadSession() {
             NormalLidDC := values.LidDC
             SaveSession()
         }
+        if SessionUsesLegacyPolicy {
+            SetSleepValues(SessionPlan, NormalAC, NormalDC)
+            if NormalDisplayAC >= 0 && NormalDisplayDC >= 0
+                SetDisplayValues(SessionPlan, NormalDisplayAC,
+                    NormalDisplayDC)
+            SessionUsesLegacyPolicy := false
+            SaveSession()
+        }
         ApplySessionPolicy()
         RefreshTray()
     } catch Error as err {
@@ -245,7 +266,7 @@ LoadSession() {
 SaveSession() {
     global SessionActive, SessionPlan, NormalAC, NormalDC
     global NormalDisplayAC, NormalDisplayDC, NormalLidAC, NormalLidDC
-    global SessionExpiry, SessionLabel
+    global SessionExpiry, SessionLabel, SessionUsesLegacyPolicy
 
     IniWrite(SessionActive ? 1 : 0, StateFile, "Session", "Active")
     IniWrite(SessionPlan, StateFile, "Session", "Plan")
@@ -257,6 +278,8 @@ SaveSession() {
     IniWrite(NormalLidDC, StateFile, "Session", "NormalLidDC")
     IniWrite(SessionExpiry, StateFile, "Session", "Expiry")
     IniWrite(SessionLabel, StateFile, "Session", "Label")
+    IniWrite(SessionUsesLegacyPolicy ? 1 : 0,
+        StateFile, "Session", "LegacyPowerPolicy")
 }
 
 RefreshTray() {
@@ -339,12 +362,8 @@ ToggleKeepDisplayOn(*) {
 
     try {
         enabled := !KeepDisplayOn
-        if SessionActive {
-            if enabled
-                SetDisplayValues(SessionPlan, 0, 0)
-            else
-                SetDisplayValues(SessionPlan, NormalDisplayAC, NormalDisplayDC)
-        }
+        if SessionActive
+            SetPowerRequestDisplay(enabled)
         KeepDisplayOn := enabled
         SavePreferences()
         RefreshOptionChecks()
@@ -484,14 +503,77 @@ ReadCurrentPowerValues() {
 }
 
 ApplySessionPolicy() {
-    SetSleepValues(SessionPlan, 0, 0)
-    if KeepDisplayOn
-        SetDisplayValues(SessionPlan, 0, 0)
+    EnsurePowerRequest()
+    SetPowerRequestDisplay(KeepDisplayOn)
     if KeepAwakeWithLidClosed {
         if NormalLidAC < 0 || NormalLidDC < 0
             throw Error("This computer does not expose a lid-close setting.")
         SetLidValues(SessionPlan, 0, 0)
     }
+}
+
+EnsurePowerRequest() {
+    global AppName, PowerRequestHandle, PowerRequestSystemSet
+
+    if PowerRequestHandle
+        return
+
+    reason := AppName " active awake session"
+    reasonContext := Buffer(8 + A_PtrSize, 0)
+    NumPut("UInt", 0, reasonContext, 0)
+    NumPut("UInt", 1, reasonContext, 4)
+    NumPut("Ptr", StrPtr(reason), reasonContext, 8)
+
+    handle := DllCall("Kernel32\PowerCreateRequest",
+        "Ptr", reasonContext.Ptr, "Ptr")
+    if !handle || handle = -1
+        throw Error("Windows could not create a power request ("
+            A_LastError ").")
+
+    if !DllCall("Kernel32\PowerSetRequest",
+        "Ptr", handle, "Int", 1, "Int") {
+        errorCode := A_LastError
+        DllCall("Kernel32\CloseHandle", "Ptr", handle)
+        throw Error("Windows could not activate the power request ("
+            errorCode ").")
+    }
+
+    PowerRequestHandle := handle
+    PowerRequestSystemSet := true
+}
+
+SetPowerRequestDisplay(enabled) {
+    global PowerRequestHandle, PowerRequestDisplaySet
+
+    if enabled
+        EnsurePowerRequest()
+    if !PowerRequestHandle || enabled = PowerRequestDisplaySet
+        return
+
+    functionName := enabled ? "PowerSetRequest" : "PowerClearRequest"
+    if !DllCall("Kernel32\" functionName,
+        "Ptr", PowerRequestHandle, "Int", 0, "Int")
+        throw Error("Windows could not update the display power request ("
+            A_LastError ").")
+    PowerRequestDisplaySet := enabled
+}
+
+ReleasePowerRequest() {
+    global PowerRequestHandle, PowerRequestSystemSet, PowerRequestDisplaySet
+
+    if !PowerRequestHandle
+        return
+
+    if PowerRequestDisplaySet
+        try DllCall("Kernel32\PowerClearRequest",
+            "Ptr", PowerRequestHandle, "Int", 0, "Int")
+    if PowerRequestSystemSet
+        try DllCall("Kernel32\PowerClearRequest",
+            "Ptr", PowerRequestHandle, "Int", 1, "Int")
+    DllCall("Kernel32\CloseHandle", "Ptr", PowerRequestHandle)
+    PowerRequestHandle := 0
+    PowerRequestSystemSet := false
+    PowerRequestDisplaySet := false
 }
 
 SetSleepValues(plan, acSeconds, dcSeconds) {
@@ -596,4 +678,6 @@ HandleExit(exitReason, exitCode) {
     global SessionActive
     if SessionActive
         RestoreNormal(false)
+    else
+        ReleasePowerRequest()
 }

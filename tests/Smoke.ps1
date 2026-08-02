@@ -55,6 +55,10 @@ Assert-True ($source -match 'StartSession\(360,\s*"6 hours"\)') 'The 6-hour sess
 Assert-True ($source -match 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run') 'Per-user startup support is missing.'
 Assert-True ($source -match 'PowerWriteACValueIndex') 'AC power-policy write is missing.'
 Assert-True ($source -match 'PowerWriteDCValueIndex') 'DC power-policy write is missing.'
+Assert-True ($source -match 'PowerCreateRequest') 'System power-request support is missing.'
+Assert-True ($source -match 'PowerClearRequest') 'Power-request cleanup is missing.'
+Assert-True ($source -notmatch 'SetSleepValues\(SessionPlan,\s*0,\s*0\)') `
+    'Awake sessions must not rewrite the normal sleep timeout.'
 Assert-True ($source -match 'Keep display on while awake') 'Display preference is missing.'
 Assert-True ($source -match 'Keep awake with lid closed') 'Lid-close preference is missing.'
 Assert-True ($source -match '3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e') 'Display timeout policy is missing.'

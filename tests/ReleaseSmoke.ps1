@@ -93,6 +93,7 @@ function Write-TestState {
         "NormalDisplayDC=$($Policy.DisplayDC)"
         "NormalLidAC=$($Policy.LidAC)"
         "NormalLidDC=$($Policy.LidDC)"
+        'LegacyPowerPolicy=0'
         'Expiry='
         "Label=$(if ($Active) { 'Indefinitely' } else { 'Normal sleep' })"
         '[Preferences]'
@@ -142,8 +143,8 @@ function Test-OptionalPolicies {
         }
         $active = Get-PowerPolicy
         foreach ($name in 'SleepAC','SleepDC','DisplayAC','DisplayDC') {
-            if ($active.$name -ne 0) {
-                throw "$Executable did not set $name to Never."
+            if ($active.$name -ne $before.$name) {
+                throw "$Executable changed $name from $($before.$name) to $($active.$name)."
             }
         }
         if ($testLid -and ($active.LidAC -ne 0 -or $active.LidDC -ne 0)) {
@@ -249,7 +250,7 @@ try {
     }
 }
 
-'Release smoke checks passed: metadata, icon, sleep/display/lid policy restoration, portable lifecycle, installer, and uninstaller.'
+'Release smoke checks passed: metadata, icon, power-request policy isolation, portable lifecycle, installer, and uninstaller.'
 } finally {
     if ($stateExisted) {
         New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null

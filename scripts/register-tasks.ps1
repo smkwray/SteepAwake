@@ -216,10 +216,13 @@ Register-ScheduledTask -TaskPath $taskPath -TaskName $taskName `
     -Action $action -Principal $principal -Settings $settings -Force | Out-Null
 
 # Do not let the interactive user redefine the high-integrity action.
+# Protect the task before its folder: from an interactive elevated session,
+# Task Scheduler denies changing a newly registered task's descriptor once the
+# folder is protected.
 $protectedSddl = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;$userSid)"
-$folder.SetSecurityDescriptor($protectedSddl, 0)
 $registered = $folder.GetTask($taskName)
 $registered.SetSecurityDescriptor($protectedSddl, 0x10)
+$folder.SetSecurityDescriptor($protectedSddl, 0)
 
 foreach ($legacyName in $legacyTasks) {
     try { $root.DeleteTask($legacyName, 0) } catch {}

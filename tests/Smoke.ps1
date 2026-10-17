@@ -121,6 +121,8 @@ Assert-True ($register -match '\\SteepAwake\\') 'Task folder is missing.'
 Assert-True ($register -match 'ExecutionTimeLimit \(\[TimeSpan\]::Zero\)') 'Task execution limit must be indefinite.'
 Assert-True ($register -match 'SetSecurityDescriptor') 'Task ACL hardening is missing.'
 Assert-True ($register -match 'TASK_DONT_ADD_PRINCIPAL_ACE|0x10') 'Task principal ACE hardening is missing.'
+# Interactive elevated setup is denied the task descriptor once the folder is protected.
+Assert-True ($register -match '(?s)\$registered\.SetSecurityDescriptor\(\$protectedSddl, 0x10\)\s*\r?\n\s*\$folder\.SetSecurityDescriptor\(\$protectedSddl, 0\)') 'The task descriptor must be set before the folder descriptor.'
 Assert-True ($register -match 'ASUSOptimization Start|ASUSOptimization Stop') 'Legacy broker-task cleanup is missing.'
 Assert-True ($register -notmatch 'Register-ScheduledTask[^\r\n]*ASUSOptimization') 'Legacy broker tasks must not be registered.'
 # The task runs the tray elevated on demand, so a writable install location

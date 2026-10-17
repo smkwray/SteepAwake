@@ -229,6 +229,12 @@ try {
         Remove-ItemProperty -LiteralPath $runKey -Name SteepAwake `
             -ErrorAction SilentlyContinue
     }
+    # A failed run must not orphan the elevated task or the uninstall entry.
+    if (Test-Path -LiteralPath $uninstaller) {
+        Start-Process -FilePath $uninstaller `
+            -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' `
+            -WindowStyle Hidden -Wait | Out-Null
+    }
     foreach ($root in @(
             @{ Path = $testRoot; Parent = $env:ProgramFiles }
             @{ Path = $writableRoot; Parent = $env:TEMP })) {

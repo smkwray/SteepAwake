@@ -10,26 +10,38 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$sourcePath = Join-Path $projectRoot 'src\SteepAwake.ahk'
+$launcherSourcePath = Join-Path $projectRoot 'src\SteepAwake.Launcher.ahk'
+$traySourcePath = Join-Path $projectRoot 'src\SteepAwake.Tray.ahk'
 $version = (Get-Content -LiteralPath (Join-Path $projectRoot 'VERSION') -Raw).Trim()
 $buildDirectory = Join-Path $projectRoot 'build'
-$buildSourcePath = Join-Path $buildDirectory 'SteepAwake.ahk'
+$buildLauncherPath = Join-Path $buildDirectory 'SteepAwake.Launcher.ahk'
+$buildTrayPath = Join-Path $buildDirectory 'SteepAwake.Tray.ahk'
 $distDirectory = Join-Path $projectRoot 'dist'
 $portablePath = Join-Path $distDirectory 'SteepAwake.exe'
+$trayPath = Join-Path $distDirectory 'SteepAwake.Tray.exe'
 $hashPath = Join-Path $distDirectory 'SHA256SUMS.txt'
 
 & (Join-Path $projectRoot 'tools\GenerateIcons.ps1')
 New-Item -ItemType Directory -Path $buildDirectory -Force | Out-Null
 New-Item -ItemType Directory -Path $distDirectory -Force | Out-Null
 
-$buildSource = Get-Content -LiteralPath $sourcePath -Raw
-$buildSource = $buildSource -replace (
+$buildLauncher = Get-Content -LiteralPath $launcherSourcePath -Raw
+$buildLauncher = $buildLauncher -replace (
     '(?m)^;@Ahk2Exe-SetFileVersion .+$'),
     ";@Ahk2Exe-SetFileVersion $version"
-$buildSource = $buildSource -replace (
+$buildLauncher = $buildLauncher -replace (
     '(?m)^;@Ahk2Exe-SetProductVersion .+$'),
     ";@Ahk2Exe-SetProductVersion $version"
-Set-Content -LiteralPath $buildSourcePath -Value $buildSource -Encoding utf8NoBOM
+Set-Content -LiteralPath $buildLauncherPath -Value $buildLauncher -Encoding utf8NoBOM
+
+$buildTray = Get-Content -LiteralPath $traySourcePath -Raw
+$buildTray = $buildTray -replace (
+    '(?m)^;@Ahk2Exe-SetFileVersion .+$'),
+    ";@Ahk2Exe-SetFileVersion $version"
+$buildTray = $buildTray -replace (
+    '(?m)^;@Ahk2Exe-SetProductVersion .+$'),
+    ";@Ahk2Exe-SetProductVersion $version"
+Set-Content -LiteralPath $buildTrayPath -Value $buildTray -Encoding utf8NoBOM
 
 if (-not $Ahk2ExePath) {
     $Ahk2ExePath = @(
@@ -56,12 +68,18 @@ if (-not $AutoHotkeyPath -or -not (Test-Path -LiteralPath $AutoHotkeyPath)) {
     throw 'AutoHotkey v2 x64 was not found. Run scripts\setup-build-tools.ps1 or pass -AutoHotkeyPath.'
 }
 
-$compilerArguments = '/in "' + $buildSourcePath + '" /out "' + $portablePath +
-    '" /base "' + $AutoHotkeyPath + '" /silent verbose'
-$compilerProcess = Start-Process -FilePath $Ahk2ExePath `
-    -ArgumentList $compilerArguments -WindowStyle Hidden -Wait -PassThru
-if ($compilerProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $portablePath)) {
-    throw "Ahk2Exe failed with exit code $($compilerProcess.ExitCode)."
+$compileTargets = @(
+    @{ Source = $buildLauncherPath; Output = $portablePath },
+    @{ Source = $buildTrayPath; Output = $trayPath }
+)
+foreach ($target in $compileTargets) {
+    $compilerArguments = '/in "' + $target.Source + '" /out "' + $target.Output +
+        '" /base "' + $AutoHotkeyPath + '" /silent verbose'
+    $compilerProcess = Start-Process -FilePath $Ahk2ExePath `
+        -ArgumentList $compilerArguments -WindowStyle Hidden -Wait -PassThru
+    if ($compilerProcess.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $target.Output)) {
+        throw "Ahk2Exe failed for $($target.Source) with exit code $($compilerProcess.ExitCode)."
+    }
 }
 
 if (-not $SkipInstaller) {

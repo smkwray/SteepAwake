@@ -5,3 +5,7 @@ build/
 *.zip
 .staging/
 .tools/
+*.bak
+/SteepAwake.exe
+/SHA256SUMS.txt
+.private-denylist

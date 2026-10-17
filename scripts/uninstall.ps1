@@ -1,26 +1,32 @@
+#Requires -RunAsAdministrator
 [CmdletBinding()]
 param()
 
 $ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 
-$installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\SteepAwake'
-$installedExe = Join-Path $installDirectory 'SteepAwake.exe'
+$installDirectory = Join-Path ${env:ProgramFiles} 'SteepAwake'
+$launcher = Join-Path $installDirectory 'SteepAwake.exe'
+$registerScript = Join-Path $PSScriptRoot 'register-tasks.ps1'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 
-if (Test-Path -LiteralPath $installedExe) {
-    $exitProcess = Start-Process -FilePath $installedExe -ArgumentList 'exit' `
-        -WindowStyle Hidden -PassThru
-    $exitProcess.WaitForExit(5000) | Out-Null
+if (Test-Path -LiteralPath $launcher) {
+    $shutdown = Start-Process -FilePath $launcher `
+        -ArgumentList '--shutdown --wait' -WindowStyle Hidden -Wait -PassThru
+    if ($shutdown.ExitCode -ne 0) {
+        throw "SteepAwake did not confirm clean shutdown (exit code $($shutdown.ExitCode))."
+    }
+}
+
+if (Test-Path -LiteralPath $registerScript) {
+    & $registerScript -Delete
 }
 
 Remove-ItemProperty -LiteralPath $runKey -Name SteepAwake `
     -ErrorAction SilentlyContinue
 
-if (Test-Path -LiteralPath $installedExe) {
-    Remove-Item -LiteralPath $installedExe -Force
-}
 if (Test-Path -LiteralPath $installDirectory) {
-    Remove-Item -LiteralPath $installDirectory -Force
+    Remove-Item -LiteralPath $installDirectory -Recurse -Force
 }
 
-'SteepAwake was removed. User preferences remain in %LOCALAPPDATA%\SteepAwake.'
+[pscustomobject]@{ Removed = $installDirectory }

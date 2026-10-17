@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$PortablePath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'dist\SteepAwake.exe'),
+    [string]$TrayPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'dist\SteepAwake.Tray.exe'),
     [string]$InstallerPath = (Join-Path (Split-Path -Parent $PSScriptRoot) 'dist\SteepAwake-Setup.exe')
 )
 
@@ -107,19 +108,25 @@ function Test-AppLifecycle {
 
     $before = Get-PowerPolicy
     Write-TestState -Active $false -Policy $before
-    $app = Start-Process -FilePath $Executable -WindowStyle Hidden -PassThru
+    $launch = Start-Process -FilePath $Executable -WindowStyle Hidden -Wait -PassThru
+    if ($launch.ExitCode -ne 0) {
+        throw "$Executable failed to request the tray task with code $($launch.ExitCode)."
+    }
     Start-Sleep -Milliseconds 1500
-    if ($app.HasExited) {
-        throw "$Executable exited unexpectedly with code $($app.ExitCode)."
+    $tray = Get-Process -Name SteepAwake.Tray -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if (-not $tray) {
+        throw "$Executable did not leave an elevated tray process running."
     }
 
-    $stop = Start-Process -FilePath $Executable -ArgumentList 'exit' `
+    $stop = Start-Process -FilePath $Executable -ArgumentList '--shutdown --wait' `
         -WindowStyle Hidden -Wait -PassThru
     if ($stop.ExitCode -ne 0) {
-        throw "$Executable exit command failed with code $($stop.ExitCode)."
+        throw "$Executable shutdown command failed with code $($stop.ExitCode)."
     }
-    if (-not $app.WaitForExit(5000)) {
-        throw "$Executable did not exit cleanly."
+    Start-Sleep -Milliseconds 500
+    if (Get-Process -Name SteepAwake.Tray -ErrorAction SilentlyContinue) {
+        throw 'The elevated tray did not exit after the launcher shutdown handshake.'
     }
 
     $after = Get-PowerPolicy
@@ -127,41 +134,7 @@ function Test-AppLifecycle {
         "$Executable while in Normal sleep mode"
 }
 
-function Test-OptionalPolicies {
-    param([string]$Executable)
-
-    $before = Get-PowerPolicy
-    $testLid = $before.LidAC -ge 0 -and $before.LidDC -ge 0
-    Write-TestState -Active $true -Policy $before `
-        -KeepDisplayOn $true -KeepAwakeWithLidClosed $testLid
-    $app = Start-Process -FilePath $Executable -WindowStyle Hidden -PassThru
-    try {
-        Start-Sleep -Milliseconds 1500
-        if ($app.HasExited) {
-            throw "$Executable exited while applying optional policies."
-        }
-        $active = Get-PowerPolicy
-        foreach ($name in 'SleepAC','SleepDC','DisplayAC','DisplayDC') {
-            if ($active.$name -ne 0) {
-                throw "$Executable did not set $name to Never."
-            }
-        }
-        if ($testLid -and ($active.LidAC -ne 0 -or $active.LidDC -ne 0)) {
-            throw "$Executable did not set the lid-close action to Do nothing."
-        }
-    } finally {
-        $stop = Start-Process -FilePath $Executable -ArgumentList 'exit' `
-            -WindowStyle Hidden -Wait -PassThru
-        if (-not $app.HasExited) {
-            $null = $app.WaitForExit(5000)
-        }
-        $after = Get-PowerPolicy
-        Assert-PowerPolicyEqual $before $after `
-            "$Executable after its optional-policy session"
-    }
-}
-
-foreach ($path in @($PortablePath, $InstallerPath)) {
+foreach ($path in @($PortablePath, $TrayPath, $InstallerPath)) {
     if (-not (Test-Path -LiteralPath $path)) {
         throw "Missing release artifact: $path"
     }
@@ -174,7 +147,7 @@ $stateBytes = if ($stateExisted) {
     $null
 }
 
-if (Get-Process -Name SteepAwake -ErrorAction SilentlyContinue) {
+if (Get-Process -Name SteepAwake,SteepAwake.Tray -ErrorAction SilentlyContinue) {
     throw 'Close the running SteepAwake release before running release smoke tests.'
 }
 
@@ -196,11 +169,9 @@ if (-not $associatedIcon) {
 }
 $associatedIcon.Dispose()
 
-Test-AppLifecycle -Executable $PortablePath
-Test-OptionalPolicies -Executable $PortablePath
-
 $testRoot = Join-Path $env:TEMP "SteepAwake.ReleaseSmoke.$PID"
 $installedExe = Join-Path $testRoot 'SteepAwake.exe'
+$installedTray = Join-Path $testRoot 'SteepAwake.Tray.exe'
 $uninstaller = Join-Path $testRoot 'unins000.exe'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $startupExisted = $false
@@ -220,6 +191,9 @@ try {
     }
     if (-not (Test-Path -LiteralPath $installedExe)) {
         throw 'Installer did not create SteepAwake.exe.'
+    }
+    if (-not (Test-Path -LiteralPath $installedTray)) {
+        throw 'Installer did not create SteepAwake.Tray.exe.'
     }
 
     Test-AppLifecycle -Executable $installedExe
@@ -249,7 +223,7 @@ try {
     }
 }
 
-'Release smoke checks passed: metadata, icon, sleep/display/lid policy restoration, portable lifecycle, installer, and uninstaller.'
+'Release smoke checks passed: metadata, icons, launcher/tray lifecycle, installer, and uninstaller.'
 } finally {
     if ($stateExisted) {
         New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null

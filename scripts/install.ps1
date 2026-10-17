@@ -1,3 +1,4 @@
+#Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
     [switch]$NoStartup,
@@ -5,32 +6,45 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$sourceExe = Join-Path $projectRoot 'dist\SteepAwake.exe'
-$installDirectory = Join-Path $env:LOCALAPPDATA 'Programs\SteepAwake'
-$installedExe = Join-Path $installDirectory 'SteepAwake.exe'
+$sourceLauncher = Join-Path $projectRoot 'dist\SteepAwake.exe'
+$sourceTray = Join-Path $projectRoot 'dist\SteepAwake.Tray.exe'
+$installDirectory = Join-Path ${env:ProgramFiles} 'SteepAwake'
+$installedLauncher = Join-Path $installDirectory 'SteepAwake.exe'
+$installedTray = Join-Path $installDirectory 'SteepAwake.Tray.exe'
+$registerScript = Join-Path $projectRoot 'scripts\register-tasks.ps1'
 $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 
-if (-not (Test-Path -LiteralPath $sourceExe)) {
-    throw 'Build dist\SteepAwake.exe before installing.'
+foreach ($required in @($sourceLauncher, $sourceTray, $registerScript)) {
+    if (-not (Test-Path -LiteralPath $required)) {
+        throw "Required installation input is missing: $required"
+    }
 }
 
 New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
-Copy-Item -LiteralPath $sourceExe -Destination $installedExe -Force
+Copy-Item -LiteralPath $sourceLauncher -Destination $installedLauncher -Force
+Copy-Item -LiteralPath $sourceTray -Destination $installedTray -Force
 
-if (-not $NoStartup) {
+& $registerScript -TrayExecutablePath $installedTray
+
+if ($NoStartup) {
+    Remove-ItemProperty -LiteralPath $runKey -Name SteepAwake `
+        -ErrorAction SilentlyContinue
+} else {
     New-ItemProperty -LiteralPath $runKey -Name SteepAwake `
-        -PropertyType String -Value ('"' + $installedExe + '"') -Force |
+        -PropertyType String -Value ('"' + $installedLauncher + '"') -Force |
         Out-Null
 }
 
 if (-not $NoLaunch) {
-    Start-Process -FilePath $installedExe -WindowStyle Hidden
+    Start-Process -FilePath $installedLauncher -WindowStyle Hidden
 }
 
 [pscustomobject]@{
-    Installed = $installedExe
+    InstalledLauncher = $installedLauncher
+    InstalledTray = $installedTray
     StartWithWindows = -not $NoStartup
     Launched = -not $NoLaunch
 }

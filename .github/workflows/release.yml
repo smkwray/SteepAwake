@@ -38,7 +38,7 @@ jobs:
             throw "Tag ${{ github.ref_name }} does not match VERSION $version."
           }
 
-      - name: Build portable app and installer
+      - name: Build launcher, tray, and installer
         shell: pwsh
         run: .\scripts\build.ps1
 
@@ -51,7 +51,6 @@ jobs:
         with:
           name: SteepAwake-${{ github.sha }}
           path: |
-            dist/SteepAwake.exe
             dist/SteepAwake-Setup.exe
             dist/SHA256SUMS.txt
           if-no-files-found: error
@@ -63,7 +62,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $assets = @(
-            '.\dist\SteepAwake.exe'
             '.\dist\SteepAwake-Setup.exe'
             '.\dist\SHA256SUMS.txt'
           )

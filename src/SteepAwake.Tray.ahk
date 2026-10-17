@@ -1305,8 +1305,8 @@ ApplySessionPolicy() {
     if !CheckSessionPlan(false)
         throw Error("The active power plan changed. Select Normal sleep first.")
     activatePlan := SessionPlanActivationAllowed()
-    ; Power requests are the primary protection. These AC-only timeout writes
-    ; remain as a compatibility fallback until the target-device A/B is complete.
+    ; Power requests are the primary protection. The AC sleep-timeout write is a
+    ; fallback for policies or drivers that do not honor a system request.
     SetSleepValues(SessionPlan, 0, NormalDC, activatePlan)
     if NormalDisplayAC >= 0 && NormalDisplayDC >= 0 {
         displayAC := KeepDisplayOn ? 0 : NormalDisplayAC

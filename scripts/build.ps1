@@ -43,6 +43,23 @@ $buildTray = $buildTray -replace (
     ";@Ahk2Exe-SetProductVersion $version"
 Set-Content -LiteralPath $buildTrayPath -Value $buildTray -Encoding utf8NoBOM
 
+# Setup runs task registration from this embedded command rather than from a
+# file in the destination folder, which could be swapped before it runs.
+# Comment lines and indentation are dropped to keep the command line short.
+$registerSource = Get-Content -LiteralPath (Join-Path $projectRoot 'scripts\register-tasks.ps1')
+$registerBody = ($registerSource |
+    ForEach-Object { $_.Trim() } |
+    Where-Object { $_ -and -not $_.StartsWith('#') }) -join "`n"
+$registerCommand = "& {`n$registerBody`n} -TrayExecutablePath `$env:STEEPAWAKE_TRAY_EXE " +
+    "-PrepareDestination:(`$env:STEEPAWAKE_PREPARE -eq '1')"
+$registerEncoded = [Convert]::ToBase64String(
+    [Text.Encoding]::Unicode.GetBytes($registerCommand))
+if ($registerEncoded.Length -gt 30000) {
+    throw "The encoded task-registration command is too long ($($registerEncoded.Length) characters)."
+}
+Set-Content -LiteralPath (Join-Path $buildDirectory 'RegisterTasks.iss') `
+    -Value "#define RegisterTasksCommand `"$registerEncoded`"" -Encoding ascii
+
 if (-not $Ahk2ExePath) {
     $Ahk2ExePath = @(
         $env:AHK2EXE_PATH

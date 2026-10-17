@@ -13,12 +13,12 @@ you already had.
 ## Download
 
 - **[SteepAwake-Setup.exe](https://github.com/smkwray/SteepAwake/releases/latest/download/SteepAwake-Setup.exe)**
-  is the recommended installer. It installs the protected tray component under
-  Program Files and asks for administrator approval once during setup.
-- **[SteepAwake.exe](https://github.com/smkwray/SteepAwake/releases/latest/download/SteepAwake.exe)**
-  is the portable single-file build.
+  installs the launcher and the protected tray component under Program Files
+  and asks for administrator approval once during setup. SteepAwake must be
+  installed under Program Files; setup refuses any location that a
+  non-administrator could modify, because the tray runs elevated.
 
-Both files and their SHA-256 checksums are available on the
+The installer and its SHA-256 checksums are available on the
 [Releases page](https://github.com/smkwray/SteepAwake/releases).
 The binaries are not code-signed, so Windows SmartScreen may ask you to confirm
 the first launch.

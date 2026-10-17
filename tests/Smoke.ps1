@@ -99,6 +99,23 @@ Assert-True ($installer -match 'PrivilegesRequired=admin') 'Installer must reque
 Assert-True ($installer -match 'SteepAwake\.Tray\.exe') 'Installer must install the elevated tray binary.'
 Assert-True ($installer -match 'register-tasks\.ps1') 'Installer task registration is missing.'
 Assert-True ($installer -notmatch 'elevatedstartup|Verb: "runas"') 'Installer must not retain the old optional UAC path.'
+# The elevated task must never point at a user-writable location, and a failed
+# registration must fail setup: [Run] entries and AfterInstall exceptions do not.
+Assert-True ($installer -match '(?s)function PrepareToInstall.*?commonpf64.*?commonpf32.*?RunRegisterTasks\(AddBackslash\(WizardDirValue\)[^;]*, True\)') 'Setup must check the destination and its ACLs before writing files.'
+# A script in the destination could be swapped between copy and execution, and
+# a command shell would run AutoRun commands and expand %variables% in paths.
+Assert-True ($installer -match 'EncodedCommand \{#RegisterTasksCommand\}') 'Setup must run task registration from the embedded command.'
+Assert-True ($installer -match 'ExecAndLogOutput\(ExpandConstant\(''\{sys\}\\WindowsPowerShell') 'Setup must start PowerShell directly.'
+Assert-True ($installer -notmatch '\{cmd\}|cmd\.exe') 'Setup must not run task registration through a command shell.'
+Assert-True ($installer -notmatch '(?s)\[Code\].*\{app\}\\register-tasks\.ps1') 'Setup must not execute the registration script from the destination folder.'
+Assert-True ($installer -match 'AfterInstall: RegisterTrayTask') 'Task registration must run from setup code that can record failure.'
+Assert-True ($installer -match '(?s)procedure RegisterTrayTask.*?if ResultCode <> 0 then.*?TaskRegistrationFailed := True') 'A failed task registration must be recorded.'
+Assert-True ($installer -match '(?s)function GetCustomSetupExitCode.*?TaskRegistrationFailed') 'A failed task registration must give setup a nonzero exit code.'
+Assert-True ($installer -notmatch '(?m)^\[Run\][^\[]*register-tasks') 'Task registration must not run from [Run], which ignores failures.'
+# Setup creates {app} itself, so uninstall must remove it explicitly.
+Assert-True ($installer -match 'Type: dirifempty; Name: "\{app\}"') 'Uninstall must remove the install directory setup created.'
+# The ASUS option is device opt-in; setup must not enable it everywhere.
+Assert-True ($installer -notmatch 'EnableAsusOptimizationToggle') 'Installer must not force-enable the ASUSOptimization option.'
 
 Assert-True ($register -match '\\SteepAwake\\') 'Task folder is missing.'
 Assert-True ($register -match 'ExecutionTimeLimit \(\[TimeSpan\]::Zero\)') 'Task execution limit must be indefinite.'
@@ -106,6 +123,27 @@ Assert-True ($register -match 'SetSecurityDescriptor') 'Task ACL hardening is mi
 Assert-True ($register -match 'TASK_DONT_ADD_PRINCIPAL_ACE|0x10') 'Task principal ACE hardening is missing.'
 Assert-True ($register -match 'ASUSOptimization Start|ASUSOptimization Stop') 'Legacy broker-task cleanup is missing.'
 Assert-True ($register -notmatch 'Register-ScheduledTask[^\r\n]*ASUSOptimization') 'Legacy broker tasks must not be registered.'
+# The task runs the tray elevated on demand, so a writable install location
+# would let any user process replace the tray and run as administrator.
+Assert-True ($register -match 'Refusing to register the elevated task outside Program Files') 'Task registration must require a Program Files location.'
+Assert-True ($register -match '(?s)Assert-AdminOnlyPath.*?ReparsePoint.*?writable by') 'Task registration must reject reparse points and non-admin write access.'
+Assert-True ($register -match '(?s)Assert-AdminOnlyPath \$checkedPath.*?Register-ScheduledTask') 'Path checks must run before the task is registered.'
+# Program Files must come from the 64-bit registry view, not inheritable
+# environment variables, and the whole ancestry must be checked.
+Assert-True ($register -match '(?s)RegistryView\]::Registry64.*?ProgramFilesDir') 'Program Files locations must come from the 64-bit registry view.'
+Assert-True ($register -notmatch 'env:ProgramFiles|ProgramW6432') 'Program Files locations must not come from environment variables.'
+Assert-True ($register -match '(?s)while \(\$checkedPath\).*?replaceMask.*?GetDirectoryName') 'The check must walk to the drive root, including Program Files itself.'
+# Files setup copies must not inherit write access from the parent folder.
+Assert-True ($register -match '(?s)if \(\$PrepareDestination\) \{.*?SetAccessRuleProtection\(\$true, \$false\).*?exit 0') 'Preparing the destination must give it a protected DACL and stop before registering.'
+# Program Files itself must never receive SteepAwake's DACL.
+Assert-True ($register -match 'installDirectory\.TrimEnd\(''\\''\)\.Length -le \$programRoot\.Length') 'The install directory must be strictly inside Program Files.'
+Assert-True ($installer -match 'Length\(Path\) > Length\(Folder\)') 'Setup must reject Program Files itself as the install directory.'
+Assert-True ($register -match 'CreateDirectory\(\$installDirectory, \$security\)') 'A new install directory must be created with its protected DACL atomically.'
+Assert-True ($register -match '\(\$insideRoot -and \$isDirectory\)') 'Directories inside Program Files must be checked including inheritable ACEs.'
+# Setup can inherit a PowerShell 7 module path that breaks Get-Acl autoloading.
+Assert-True ($register -notmatch 'Get-Acl\s+-') 'Task registration must read ACLs without the Get-Acl module.'
+Assert-True ($register -match 'Definition\.Settings\.ExecutionTimeLimit') 'Post-registration validation must read Definition.Settings.'
+Assert-True ($register -notmatch '\$registered\.Settings') 'RegisteredTask has no Settings property; validation would throw.'
 
 if (Test-Path -LiteralPath $autoHotkeyPath) {
     foreach ($source in @($launcherPath, $trayPath)) {

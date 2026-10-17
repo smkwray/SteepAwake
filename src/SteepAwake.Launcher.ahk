@@ -1,3 +1,13 @@
+;@Ahk2Exe-SetMainIcon ..\assets\indefinite-dark.ico
+;@Ahk2Exe-SetCompanyName smkwray
+;@Ahk2Exe-SetDescription Start the SteepAwake tray
+;@Ahk2Exe-SetFileVersion 0.2.2
+;@Ahk2Exe-SetInternalName SteepAwake
+;@Ahk2Exe-SetCopyright Copyright (c) 2026 Shane Wray
+;@Ahk2Exe-SetName SteepAwake
+;@Ahk2Exe-SetOrigFilename SteepAwake.exe
+;@Ahk2Exe-SetProductName SteepAwake
+;@Ahk2Exe-SetProductVersion 0.2.2
 ; SteepAwake public launcher. It is intentionally unelevated and has no tray UI.
 #Requires AutoHotkey v2.0
 #SingleInstance Off

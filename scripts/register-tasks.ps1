@@ -2,7 +2,9 @@
 [CmdletBinding()]
 param(
     [string]$TrayExecutablePath,
-    [switch]$Delete
+    [switch]$Delete,
+    # Check the destination and create it admin-only before setup copies files.
+    [switch]$PrepareDestination
 )
 
 $ErrorActionPreference = 'Stop'
@@ -61,8 +63,131 @@ if ($Delete) {
     exit 0
 }
 
-if (-not $TrayExecutablePath -or -not (Test-Path -LiteralPath $TrayExecutablePath)) {
+if (-not $TrayExecutablePath) {
+    throw 'The elevated tray executable path is required.'
+}
+$TrayExecutablePath = [IO.Path]::GetFullPath($TrayExecutablePath)
+if (-not $PrepareDestination -and -not [IO.File]::Exists($TrayExecutablePath)) {
     throw "The elevated tray executable was not found: $TrayExecutablePath"
+}
+
+# The task runs the tray elevated on demand, so no non-administrator may be
+# able to replace its executable or any directory on the way to it.
+$trustedSids = @(
+    'S-1-5-18'      # SYSTEM
+    'S-1-5-32-544'  # Administrators
+    'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'  # TrustedInstaller
+)
+# Inside Program Files: WriteData, AppendData, DeleteChild, Delete, WRITE_DAC,
+# WRITE_OWNER, GENERIC_ALL, GENERIC_WRITE.
+$writeMask = 0x2 -bor 0x4 -bor 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 `
+    -bor 0x10000000 -bor 0x40000000
+# Program Files and its ancestors may allow creating siblings (the drive root
+# does), but nothing that renames, deletes, or re-permissions the path.
+$replaceMask = 0x40 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000
+
+# Inheritable ACEs on a directory decide what its future children allow, so
+# directories inside Program Files are checked with them included.
+function Assert-AdminOnlyPath([string]$Path, [int]$Mask, [bool]$IncludeInheritable) {
+    # Use .NET rather than Get-Item/Get-Acl, which can fail to autoload when
+    # setup inherits a PowerShell 7 module path.
+    $attributes = [IO.File]::GetAttributes($Path)
+    if ($attributes -band [IO.FileAttributes]::ReparsePoint) {
+        throw "Refusing to register the elevated task through a reparse point: $Path"
+    }
+    $sidType = [Security.Principal.SecurityIdentifier]
+    $sections = [Security.AccessControl.AccessControlSections]'Owner, Access'
+    $acl = if ($attributes -band [IO.FileAttributes]::Directory) {
+        New-Object Security.AccessControl.DirectorySecurity($Path, $sections)
+    } else {
+        New-Object Security.AccessControl.FileSecurity($Path, $sections)
+    }
+    $owner = $acl.GetOwner($sidType).Value
+    if ($owner -notin $trustedSids) {
+        throw "Refusing to register the elevated task: $Path is not owned by an administrator."
+    }
+    foreach ($rule in $acl.GetAccessRules($true, $true, $sidType)) {
+        if ($rule.AccessControlType -ne 'Allow') { continue }
+        $inheritOnly = $rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly
+        if ($inheritOnly -and -not $IncludeInheritable) { continue }
+        if (([int]$rule.FileSystemRights -band $Mask) -eq 0) { continue }
+        # CREATOR OWNER resolves to the creator, which is elevated setup here.
+        if ($inheritOnly -and $rule.IdentityReference.Value -eq 'S-1-3-0') { continue }
+        if ($rule.IdentityReference.Value -notin $trustedSids) {
+            throw "Refusing to register the elevated task: $Path is writable by $($rule.IdentityReference.Value)."
+        }
+    }
+}
+
+# Setup runs 32-bit PowerShell, so read the Program Files locations from the
+# 64-bit registry view rather than from inheritable environment variables.
+$hklm = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+    [Microsoft.Win32.RegistryHive]::LocalMachine,
+    [Microsoft.Win32.RegistryView]::Registry64)
+$currentVersion = $hklm.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion')
+$programRoots = @('ProgramFilesDir', 'ProgramFilesDir (x86)') |
+    ForEach-Object { $currentVersion.GetValue($_) } | Where-Object { $_ } |
+    ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\') }
+$programRoot = $programRoots | Where-Object {
+    $TrayExecutablePath.StartsWith($_ + '\', [StringComparison]::OrdinalIgnoreCase) } |
+    Select-Object -First 1
+$installDirectory = [IO.Path]::GetDirectoryName($TrayExecutablePath)
+# The install directory gets its own DACL, so it must be strictly inside
+# Program Files and never Program Files itself.
+if (-not $programRoot -or $installDirectory.TrimEnd('\').Length -le $programRoot.Length) {
+    throw "Refusing to register the elevated task outside Program Files: $TrayExecutablePath"
+}
+
+# Walk from the executable to the drive root. Only the install directory may
+# be missing, and only while preparing it.
+$checkedPath = $TrayExecutablePath
+while ($checkedPath) {
+    $insideRoot = $checkedPath.Length -gt $programRoot.Length
+    $isDirectory = [IO.Directory]::Exists($checkedPath)
+    if ($isDirectory -or [IO.File]::Exists($checkedPath)) {
+        Assert-AdminOnlyPath $checkedPath `
+            ($(if ($insideRoot) { $writeMask } else { $replaceMask })) `
+            ($insideRoot -and $isDirectory)
+    } elseif (-not ($PrepareDestination -and
+        ($checkedPath -eq $TrayExecutablePath -or $checkedPath -eq $installDirectory))) {
+        throw "The parent folder must already exist: $checkedPath"
+    }
+    $checkedPath = [IO.Path]::GetDirectoryName($checkedPath)
+}
+
+if ($PrepareDestination) {
+    # Give the install directory a protected admin-only DACL so the files setup
+    # copies inherit nothing from the parent. A new directory is created with
+    # this descriptor atomically.
+    $security = New-Object Security.AccessControl.DirectorySecurity
+    $security.SetAccessRuleProtection($true, $false)
+    $inheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    foreach ($grant in @(
+            @('S-1-5-18', 'FullControl'),
+            @('S-1-5-32-544', 'FullControl'),
+            @('S-1-5-32-545', 'ReadAndExecute'))) {
+        $security.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            (New-Object Security.Principal.SecurityIdentifier($grant[0])),
+            [Security.AccessControl.FileSystemRights]$grant[1], $inheritance,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow)))
+    }
+    $directory = New-Object IO.DirectoryInfo($installDirectory)
+    $desktop = $PSVersionTable.PSEdition -eq 'Desktop'
+    if (-not $directory.Exists) {
+        $security.SetOwner((New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')))
+        if ($desktop) {
+            [IO.Directory]::CreateDirectory($installDirectory, $security) | Out-Null
+        } else {
+            [IO.FileSystemAclExtensions]::Create($directory, $security)
+        }
+    } elseif ($desktop) {
+        $directory.SetAccessControl($security)
+    } else {
+        [IO.FileSystemAclExtensions]::SetAccessControl($directory, $security)
+    }
+    Assert-AdminOnlyPath $installDirectory $writeMask $true
+    exit 0
 }
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -111,7 +236,7 @@ if (-not $registered.Enabled `
     -or $registered.Definition.Principal.LogonType -ne 3 `
     -or $registeredAction.Path -ne $TrayExecutablePath `
     -or $registeredAction.Arguments -ne '--task-entry' `
-    -or $registered.Settings.ExecutionTimeLimit -ne 'PT0S') {
+    -or $registered.Definition.Settings.ExecutionTimeLimit -ne 'PT0S') {
     throw 'The protected SteepAwake tray task did not validate after registration.'
 }
 

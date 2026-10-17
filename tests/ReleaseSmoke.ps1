@@ -169,7 +169,8 @@ if (-not $associatedIcon) {
 }
 $associatedIcon.Dispose()
 
-$testRoot = Join-Path $env:TEMP "SteepAwake.ReleaseSmoke.$PID"
+$testRoot = Join-Path $env:ProgramFiles "SteepAwake.ReleaseSmoke.$PID"
+$writableRoot = Join-Path $env:TEMP "SteepAwake.ReleaseSmoke.$PID"
 $installedExe = Join-Path $testRoot 'SteepAwake.exe'
 $installedTray = Join-Path $testRoot 'SteepAwake.Tray.exe'
 $uninstaller = Join-Path $testRoot 'unins000.exe'
@@ -181,6 +182,22 @@ try {
         $startupValue = Get-ItemPropertyValue -LiteralPath $runKey -Name SteepAwake
         $startupExisted = $true
     } catch {}
+
+    # The task runs the tray elevated on demand, so setup must refuse a
+    # location a non-administrator could modify and must not leave the task
+    # pointing there.
+    $arguments = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS="" /DIR="' +
+        $writableRoot + '"'
+    $refused = Start-Process -FilePath $InstallerPath -ArgumentList $arguments `
+        -WindowStyle Hidden -Wait -PassThru
+    if ($refused.ExitCode -eq 0) {
+        throw 'Installer accepted a user-writable install directory.'
+    }
+    $leftoverTask = Get-ScheduledTask -TaskPath '\SteepAwake\' -TaskName 'Tray' `
+        -ErrorAction SilentlyContinue
+    if ($leftoverTask -and ($leftoverTask.Actions.Execute -like "$writableRoot*")) {
+        throw 'The elevated task points at a user-writable install directory.'
+    }
 
     $arguments = '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS="" /DIR="' +
         $testRoot + '"'
@@ -212,14 +229,18 @@ try {
         Remove-ItemProperty -LiteralPath $runKey -Name SteepAwake `
             -ErrorAction SilentlyContinue
     }
-    if (Test-Path -LiteralPath $testRoot) {
-        $resolvedTestRoot = [IO.Path]::GetFullPath($testRoot)
-        $resolvedTemp = [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\') + '\'
-        if (-not $resolvedTestRoot.StartsWith(
-            $resolvedTemp, [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Refusing to remove unexpected test path: $resolvedTestRoot"
+    foreach ($root in @(
+            @{ Path = $testRoot; Parent = $env:ProgramFiles }
+            @{ Path = $writableRoot; Parent = $env:TEMP })) {
+        if (-not (Test-Path -LiteralPath $root.Path)) { continue }
+        $resolvedRoot = [IO.Path]::GetFullPath($root.Path)
+        $resolvedParent = [IO.Path]::GetFullPath($root.Parent).TrimEnd('\') + '\'
+        if (-not $resolvedRoot.StartsWith(
+            $resolvedParent, [StringComparison]::OrdinalIgnoreCase) -or
+            (Split-Path -Leaf $resolvedRoot) -notlike 'SteepAwake.ReleaseSmoke.*') {
+            throw "Refusing to remove unexpected test path: $resolvedRoot"
         }
-        Remove-Item -LiteralPath $resolvedTestRoot -Recurse -Force
+        Remove-Item -LiteralPath $resolvedRoot -Recurse -Force
     }
 }
 

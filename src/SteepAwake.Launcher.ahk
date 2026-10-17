@@ -22,7 +22,10 @@ RunLauncherMode() {
     try {
         if HasArgument("--shutdown")
             return SignalTrayShutdown(HasArgument("--wait"))
-        return StartElevatedTray()
+        result := StartElevatedTray()
+        if HasArgument("--awake")
+            SignalTrayAwake()
+        return result
     } catch Error as err {
         details := err.Message
         try details .= "`n`nWhat: " err.What "`nLine: " err.Line
@@ -82,6 +85,21 @@ SignalTrayShutdown(waitForStopped) {
         return 0
     } finally {
         CloseHandle(shutdown)
+    }
+}
+
+; Asks the running tray to start an indefinite awake session.
+SignalTrayAwake() {
+    awake := OpenNamedEvent("Local\SteepAwake.Tray.Awake." CurrentUserSid(),
+        0x0002)
+    if !awake
+        throw Error("The elevated tray did not expose its awake event.")
+    try {
+        if !DllCall("Kernel32\SetEvent", "Ptr", awake)
+            throw Error("Windows could not signal the elevated tray ("
+                A_LastError ").")
+    } finally {
+        CloseHandle(awake)
     }
 }
 

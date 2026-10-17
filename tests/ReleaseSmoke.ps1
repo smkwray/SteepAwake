@@ -17,6 +17,17 @@ $lidSetting = '5ca83367-6e45-459f-a27b-476b1d01c936'
 $stateDirectory = Join-Path $env:LOCALAPPDATA 'SteepAwake'
 $statePath = Join-Path $stateDirectory 'state.ini'
 
+function Get-PowerSchemes {
+    $text = (powercfg /list) -join "`n"
+    $schemes = [regex]::Matches(
+        $text, '(?i)GUID:\s*([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})') |
+        ForEach-Object { $_.Groups[1].Value }
+    if ($LASTEXITCODE -ne 0 -or -not $schemes) {
+        throw 'Could not list the power schemes.'
+    }
+    return $schemes
+}
+
 function Get-ActiveScheme {
     $text = (powercfg /getactivescheme) -join "`n"
     if ($LASTEXITCODE -ne 0 -or
@@ -30,10 +41,11 @@ function Get-PowerSetting {
     param(
         [string]$Group,
         [string]$Setting,
-        [switch]$Optional
+        [switch]$Optional,
+        [string]$Scheme = 'SCHEME_CURRENT'
     )
 
-    $text = (powercfg /qh SCHEME_CURRENT $Group $Setting) -join "`n"
+    $text = (powercfg /qh $Scheme $Group $Setting) -join "`n"
     $matches = [regex]::Matches(
         $text, '(?im)Current (?:AC|DC) Power Setting Index:\s*0x([0-9a-f]+)')
     if ($LASTEXITCODE -ne 0 -or $matches.Count -ne 2) {
@@ -49,11 +61,13 @@ function Get-PowerSetting {
 }
 
 function Get-PowerPolicy {
-    $sleep = Get-PowerSetting $sleepGroup $sleepSetting
-    $display = Get-PowerSetting $displayGroup $displaySetting
-    $lid = Get-PowerSetting $lidGroup $lidSetting -Optional
+    param([string]$Scheme = (Get-ActiveScheme))
+
+    $sleep = Get-PowerSetting $sleepGroup $sleepSetting -Scheme $Scheme
+    $display = Get-PowerSetting $displayGroup $displaySetting -Scheme $Scheme
+    $lid = Get-PowerSetting $lidGroup $lidSetting -Optional -Scheme $Scheme
     return [pscustomobject]@{
-        Plan = Get-ActiveScheme
+        Plan = $Scheme
         SleepAC = $sleep.AC
         SleepDC = $sleep.DC
         DisplayAC = $display.AC
@@ -76,26 +90,32 @@ function Assert-PowerPolicyEqual {
     }
 }
 
+function Get-AllPowerPolicies {
+    $policies = @{}
+    foreach ($scheme in Get-PowerSchemes) {
+        $policies[$scheme] = Get-PowerPolicy -Scheme $scheme
+    }
+    return $policies
+}
+
+function Assert-AllPowerPoliciesEqual {
+    param([hashtable]$Expected, [string]$Context)
+
+    $actual = Get-AllPowerPolicies
+    foreach ($scheme in $Expected.Keys) {
+        Assert-PowerPolicyEqual $Expected[$scheme] $actual[$scheme] "$Context ($scheme)"
+    }
+}
+
 function Write-TestState {
     param(
-        [bool]$Active,
-        [pscustomobject]$Policy,
         [bool]$KeepDisplayOn = $false,
         [bool]$KeepAwakeWithLidClosed = $false
     )
     New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
     $content = @(
         '[Session]'
-        "Active=$([int]$Active)"
-        "Plan=$($Policy.Plan)"
-        "NormalAC=$($Policy.SleepAC)"
-        "NormalDC=$($Policy.SleepDC)"
-        "NormalDisplayAC=$($Policy.DisplayAC)"
-        "NormalDisplayDC=$($Policy.DisplayDC)"
-        "NormalLidAC=$($Policy.LidAC)"
-        "NormalLidDC=$($Policy.LidDC)"
-        'Expiry='
-        "Label=$(if ($Active) { 'Indefinitely' } else { 'Normal sleep' })"
+        'Active=0'
         '[Preferences]'
         "KeepDisplayOn=$([int]$KeepDisplayOn)"
         "KeepAwakeWithLidClosed=$([int]$KeepAwakeWithLidClosed)"
@@ -107,7 +127,7 @@ function Test-AppLifecycle {
     param([string]$Executable)
 
     $before = Get-PowerPolicy
-    Write-TestState -Active $false -Policy $before
+    Write-TestState
     $launch = Start-Process -FilePath $Executable -WindowStyle Hidden -Wait -PassThru
     if ($launch.ExitCode -ne 0) {
         throw "$Executable failed to request the tray task with code $($launch.ExitCode)."
@@ -132,6 +152,59 @@ function Test-AppLifecycle {
     $after = Get-PowerPolicy
     Assert-PowerPolicyEqual $before $after `
         "$Executable while in Normal sleep mode"
+}
+
+# Armoury Crate switches the active plan when AC drops out, and Windows applies
+# that plan's lid action at once, so an awake session must override every plan
+# and restore every plan when it ends, without switching the active plan.
+function Test-AwakeSession {
+    param([string]$Executable)
+
+    $activeBefore = Get-ActiveScheme
+    $before = Get-AllPowerPolicies
+    $lidExposed = $before[$activeBefore].LidAC -ge 0
+    Write-TestState -KeepDisplayOn $true -KeepAwakeWithLidClosed $lidExposed
+    $launch = Start-Process -FilePath $Executable -ArgumentList '--awake' `
+        -WindowStyle Hidden -Wait -PassThru
+    if ($launch.ExitCode -ne 0) {
+        throw "$Executable --awake failed with code $($launch.ExitCode)."
+    }
+    $deadline = (Get-Date).AddSeconds(15)
+    while ((Get-Date) -lt $deadline -and
+        -not (Select-String -LiteralPath $statePath -Pattern '^Active=1' -Quiet)) {
+        Start-Sleep -Milliseconds 250
+    }
+    if (-not (Select-String -LiteralPath $statePath -Pattern '^Active=1' -Quiet)) {
+        throw "$Executable --awake did not start an awake session."
+    }
+
+    $during = Get-AllPowerPolicies
+    foreach ($scheme in $before.Keys) {
+        $normal = $before[$scheme]
+        $session = $during[$scheme]
+        if ($session.SleepAC -ne 0 -or $session.DisplayAC -ne 0) {
+            throw "The awake session did not override the AC timeouts of $scheme."
+        }
+        if ($session.SleepDC -ne $normal.SleepDC -or $session.DisplayDC -ne $normal.DisplayDC) {
+            throw "The awake session changed the battery timeouts of $scheme."
+        }
+        if ($lidExposed -and ($session.LidAC -ne 0 -or $session.LidDC -ne 0)) {
+            throw "The awake session did not override the lid action of $scheme."
+        }
+    }
+    if ((Get-ActiveScheme) -ne $activeBefore) {
+        throw 'The awake session switched the active power plan.'
+    }
+
+    $stop = Start-Process -FilePath $Executable -ArgumentList '--shutdown --wait' `
+        -WindowStyle Hidden -Wait -PassThru
+    if ($stop.ExitCode -ne 0) {
+        throw "$Executable shutdown command failed with code $($stop.ExitCode)."
+    }
+    Assert-AllPowerPoliciesEqual $before "Ending the awake session"
+    if ((Get-ActiveScheme) -ne $activeBefore) {
+        throw 'Ending the awake session switched the active power plan.'
+    }
 }
 
 foreach ($path in @($PortablePath, $TrayPath, $InstallerPath)) {
@@ -214,6 +287,7 @@ try {
     }
 
     Test-AppLifecycle -Executable $installedExe
+    Test-AwakeSession -Executable $installedExe
 
     $uninstall = Start-Process -FilePath $uninstaller `
         -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' `
@@ -250,7 +324,7 @@ try {
     }
 }
 
-'Release smoke checks passed: metadata, icons, launcher/tray lifecycle, installer, and uninstaller.'
+'Release smoke checks passed: metadata, icons, launcher/tray lifecycle, awake session across every plan, installer, and uninstaller.'
 } finally {
     if ($stateExisted) {
         New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null

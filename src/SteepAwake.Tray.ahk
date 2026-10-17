@@ -27,15 +27,8 @@ global DeviceConfigFile := StateDirectory "\device.ini"
 global StartupKey := "HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
 global StartupValueName := "SteepAwake"
 global SessionActive := false
-global SessionPlan := ""
-global NormalAC := 0
-global NormalDC := 0
-global NormalDisplayAC := -1
-global NormalDisplayDC := -1
-global NormalLidAC := -1
-global NormalLidDC := -1
-global SessionPlanChanged := false
-global SessionPlanWarningShown := false
+; Saved sleep, display and lid values for every power plan, keyed by plan GUID.
+global SessionPlans := Map()
 global SessionExpiry := ""
 global SessionLabel := "Normal sleep"
 global KeepDisplayOn := false
@@ -56,6 +49,7 @@ global TrayMutexHandle := 0
 global TrayReadyEventHandle := 0
 global TrayShutdownEventHandle := 0
 global TrayStoppedEventHandle := 0
+global TrayAwakeEventHandle := 0
 global TrayShuttingDown := false
 global PowerRequestHandle := 0
 ; POWER_REQUEST_TYPE values from winnt.h.
@@ -97,7 +91,7 @@ RefreshAsusOptimizationState()
 BuildTrayMenu()
 LoadSession()
 SetTimer(CheckExpiration, 5000)
-SetTimer(CheckTrayShutdown, 250)
+SetTimer(CheckTrayEvents, 250)
 OnMessage(0x001A, HandleSettingChange)
 OnExit(HandleExit)
 OnMessage(0x0218, HandlePowerBroadcast)
@@ -126,7 +120,7 @@ AcquireTrayMutex() {
 CreateTrayControlEvents() {
     global TraySid
     global TrayReadyEventHandle, TrayShutdownEventHandle
-    global TrayStoppedEventHandle
+    global TrayStoppedEventHandle, TrayAwakeEventHandle
 
     TrayReadyEventHandle := CreateTrayEvent(
         "Local\SteepAwake.Tray.Ready." TraySid)
@@ -134,18 +128,40 @@ CreateTrayControlEvents() {
         "Local\SteepAwake.Tray.Shutdown." TraySid)
     TrayStoppedEventHandle := CreateTrayEvent(
         "Local\SteepAwake.Tray.Stopped." TraySid)
+    ; The elevated token's default DACL omits the user, so grant the unelevated
+    ; launcher the right to signal this event, as clicking the menu would.
+    TrayAwakeEventHandle := CreateTrayEvent(
+        "Local\SteepAwake.Tray.Awake." TraySid,
+        "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x100002;;;" TraySid ")")
     ResetTrayEvent(TrayReadyEventHandle)
     ResetTrayEvent(TrayShutdownEventHandle)
     ResetTrayEvent(TrayStoppedEventHandle)
+    ResetTrayEvent(TrayAwakeEventHandle)
 }
 
-CreateTrayEvent(name) {
-    handle := DllCall("Kernel32\CreateEventW", "Ptr", 0, "Int", 1,
-        "Int", 0, "WStr", name, "Ptr")
-    if !handle
-        throw Error("Windows could not create a SteepAwake control event ("
-            A_LastError ").")
-    return handle
+CreateTrayEvent(name, sddl := "") {
+    attributes := 0
+    descriptor := 0
+    if sddl {
+        if !DllCall("Advapi32\ConvertStringSecurityDescriptorToSecurityDescriptorW",
+            "WStr", sddl, "UInt", 1, "Ptr*", &descriptor, "Ptr", 0)
+            throw Error("Windows could not build a SteepAwake event descriptor ("
+                A_LastError ").")
+        attributes := Buffer(8 + 2 * A_PtrSize, 0)
+        NumPut("UInt", attributes.Size, attributes, 0)
+        NumPut("Ptr", descriptor, attributes, A_PtrSize)
+    }
+    try {
+        handle := DllCall("Kernel32\CreateEventW", "Ptr", attributes, "Int", 1,
+            "Int", 0, "WStr", name, "Ptr")
+        if !handle
+            throw Error("Windows could not create a SteepAwake control event ("
+                A_LastError ").")
+        return handle
+    } finally {
+        if descriptor
+            DllCall("Kernel32\LocalFree", "Ptr", descriptor, "Ptr")
+    }
 }
 
 ResetTrayEvent(handle) {
@@ -161,13 +177,20 @@ SignalTrayReady() {
             A_LastError ").")
 }
 
-CheckTrayShutdown(*) {
-    global TrayShutdownEventHandle, TrayShuttingDown
+CheckTrayEvents(*) {
+    global TrayShutdownEventHandle, TrayAwakeEventHandle, TrayShuttingDown
 
-    if !TrayShuttingDown
-        && DllCall("Kernel32\WaitForSingleObject",
-            "Ptr", TrayShutdownEventHandle, "UInt", 0, "UInt") = 0
-        ShutdownTray()
+    if TrayShuttingDown
+        return
+    if DllCall("Kernel32\WaitForSingleObject",
+        "Ptr", TrayShutdownEventHandle, "UInt", 0, "UInt") = 0
+        return ShutdownTray()
+    ; `SteepAwake.exe --awake` starts an indefinite session, as the menu does.
+    if DllCall("Kernel32\WaitForSingleObject",
+        "Ptr", TrayAwakeEventHandle, "UInt", 0, "UInt") = 0 {
+        ResetTrayEvent(TrayAwakeEventHandle)
+        SelectIndefinitely()
+    }
 }
 
 ShutdownTray() {
@@ -289,8 +312,7 @@ SelectIndefinitely(*) {
 }
 
 StartSession(minutes, label) {
-    global SessionActive, SessionPlan, NormalAC, NormalDC
-    global NormalDisplayAC, NormalDisplayDC, NormalLidAC, NormalLidDC
+    global SessionActive, SessionPlans
     global SessionExpiry, SessionLabel
     global AsusOptimizationSessionId, AsusOptimizationPhase
     global NodeProtectionFailureShown, RestoreFailureNoticeShown
@@ -298,21 +320,12 @@ StartSession(minutes, label) {
     try {
         if SessionActive && AsusOptimizationPhase = "restore_failed"
             throw Error("The previous session still needs restoration.")
-        if SessionActive {
-            if !CheckSessionPlan(false)
-                throw Error("The active power plan changed. Select Normal sleep before starting another awake session.")
-        }
         if !SessionActive {
-            values := ReadCurrentPowerValues()
             if !IsAcPowerAvailable()
                 throw Error("Awake sessions require AC power. Plug in the computer before starting one.")
-            SessionPlan := values.Plan
-            NormalAC := values.AC
-            NormalDC := values.DC
-            NormalDisplayAC := values.DisplayAC
-            NormalDisplayDC := values.DisplayDC
-            NormalLidAC := values.LidAC
-            NormalLidDC := values.LidDC
+            SessionPlans := Map()
+            for plan in PowerSchemes()
+                SessionPlans[plan] := ReadPowerValues(plan)
             AsusOptimizationSessionId := FormatTime(A_NowUTC, "yyyyMMddHHmmss")
                 . "-" . A_TickCount
             AsusOptimizationPhase := "enter_prepared"
@@ -344,25 +357,28 @@ StartSession(minutes, label) {
 }
 
 RestoreNormal(showNotice := false) {
-    global SessionActive, SessionPlan, NormalAC, NormalDC
-    global NormalDisplayAC, NormalDisplayDC, NormalLidAC, NormalLidDC
+    global SessionActive, SessionPlans
     global SessionExpiry, SessionLabel
     global AsusOptimizationBeforeState, AsusOptimizationRestoreRequired
     global AsusOptimizationPhase, AsusOptimizationSessionId
     global AsusOptimizationLastError
-    global SessionPlanChanged, SessionPlanWarningShown
     global RestoreFailureNoticeShown
 
     try {
-        if SessionActive && SessionPlan {
-            CheckSessionPlan(false)
-            activatePlan := !SessionPlanChanged
-            SetSleepValues(SessionPlan, NormalAC, NormalDC, activatePlan)
-            if NormalDisplayAC >= 0 && NormalDisplayDC >= 0
-                SetDisplayValues(SessionPlan, NormalDisplayAC, NormalDisplayDC,
-                    activatePlan)
-            if NormalLidAC >= 0 && NormalLidDC >= 0
-                SetLidValues(SessionPlan, NormalLidAC, NormalLidDC, activatePlan)
+        if SessionActive && SessionPlans.Count {
+            existingPlans := Map()
+            for plan in PowerSchemes()
+                existingPlans[plan] := true
+            for plan, normal in SessionPlans {
+                ; A plan deleted during the session has nothing to restore.
+                if !existingPlans.Has(plan)
+                    continue
+                SetSleepValues(plan, normal.AC, normal.DC)
+                SetDisplayValues(plan, normal.DisplayAC, normal.DisplayDC)
+                if normal.LidAC >= 0 && normal.LidDC >= 0
+                    SetLidValues(plan, normal.LidAC, normal.LidDC)
+            }
+            ReapplyActiveScheme()
         }
 
         RestoreAsusOptimizationService()
@@ -386,15 +402,8 @@ RestoreNormal(showNotice := false) {
         return false
     }
 
-    planChanged := SessionPlanChanged
     SessionActive := false
-    SessionPlan := ""
-    NormalAC := 0
-    NormalDC := 0
-    NormalDisplayAC := -1
-    NormalDisplayDC := -1
-    NormalLidAC := -1
-    NormalLidDC := -1
+    SessionPlans := Map()
     SessionExpiry := ""
     SessionLabel := "Normal sleep"
     AsusOptimizationBeforeState := ""
@@ -402,18 +411,12 @@ RestoreNormal(showNotice := false) {
     AsusOptimizationPhase := "none"
     AsusOptimizationSessionId := ""
     AsusOptimizationLastError := ""
-    SessionPlanChanged := false
-    SessionPlanWarningShown := false
     RestoreFailureNoticeShown := false
     SaveSession()
     RefreshTray()
 
-    if showNotice {
-        notice := "The normal Windows sleep policy is active."
-        if planChanged
-            notice := "The active power plan changed, so the awake session ended without switching Armoury Crate's plan."
-        TrayTip(notice, AppName, 1)
-    }
+    if showNotice
+        TrayTip("The normal Windows sleep policy is active.", AppName, 1)
     return true
 }
 
@@ -421,8 +424,12 @@ CheckExpiration() {
     global SessionActive, SessionExpiry
 
     if SessionActive {
-        if !CheckSessionPlan(false)
+        try {
+            CoverActivePlan()
+        } catch Error as err {
+            TrayTip("The awake session is ending: " err.Message, AppName, 2)
             return RestoreNormal(true)
+        }
     }
 
     if SessionActive && SessionExpiry {
@@ -633,73 +640,45 @@ PowerSettingGuidMatches(settingPtr, expectedGuid) {
     return StrLower(StrGet(textBuffer, "UTF-16")) = StrLower(expectedGuid)
 }
 
-SessionPlanActivationAllowed() {
-    global SessionPlanChanged
-    return !SessionPlanChanged
-}
+; Every plan is overridden at session start, but a plan created during the
+; session is not, so cover it as soon as it becomes active.
+CoverActivePlan() {
+    global SessionPlans
 
-CheckSessionPlan(showNotice := true) {
-    global SessionActive, SessionPlan
-    global SessionPlanChanged, SessionPlanWarningShown
-
-    if !SessionActive || !SessionPlan
-        return true
-    if SessionPlanChanged {
-        if showNotice && !SessionPlanWarningShown {
-            SessionPlanWarningShown := true
-            TrayTip("The active power plan changed. Select Normal sleep to end this session.",
-                AppName, 2)
-        }
-        return false
-    }
-
-    try {
-        activePlan := GetActiveScheme()
-    } catch {
-        SessionPlanChanged := true
-        SaveSession()
-        if showNotice && !SessionPlanWarningShown {
-            SessionPlanWarningShown := true
-            TrayTip("The active power plan could not be verified. Select Normal sleep to end this session.",
-                AppName, 2)
-        }
-        return false
-    }
-    if StrLower(activePlan) = StrLower(SessionPlan)
-        return true
-
-    SessionPlanChanged := true
+    plan := GetActiveScheme()
+    if SessionPlans.Has(plan)
+        return
+    SessionPlans[plan] := ReadPowerValues(plan)
     SaveSession()
-    if showNotice && !SessionPlanWarningShown {
-        SessionPlanWarningShown := true
-        TrayTip("The active power plan changed. Select Normal sleep to end this session.",
-            AppName, 2)
-    }
-    return false
+    ApplySessionPolicy()
 }
 
 LoadSession() {
-    global SessionActive, SessionPlan, NormalAC, NormalDC
-    global NormalDisplayAC, NormalDisplayDC, NormalLidAC, NormalLidDC
+    global SessionActive, SessionPlans
     global SessionExpiry, SessionLabel
-    global SessionPlanChanged, SessionPlanWarningShown
     global AsusOptimizationBeforeState, AsusOptimizationRestoreRequired
     global AsusOptimizationPhase, AsusOptimizationSessionId
     global AsusOptimizationLastError
 
     SessionActive := Integer(IniRead(StateFile, "Session", "Active", "0")) = 1
-    SessionPlan := IniRead(StateFile, "Session", "Plan", "")
-    NormalAC := Integer(IniRead(StateFile, "Session", "NormalAC", "0"))
-    NormalDC := Integer(IniRead(StateFile, "Session", "NormalDC", "0"))
-    NormalDisplayAC := Integer(IniRead(
-        StateFile, "Session", "NormalDisplayAC", "-1"))
-    NormalDisplayDC := Integer(IniRead(
-        StateFile, "Session", "NormalDisplayDC", "-1"))
-    NormalLidAC := Integer(IniRead(StateFile, "Session", "NormalLidAC", "-1"))
-    NormalLidDC := Integer(IniRead(StateFile, "Session", "NormalLidDC", "-1"))
-    SessionPlanChanged := Integer(IniRead(
-        StateFile, "Session", "PlanChanged", "0")) = 1
-    SessionPlanWarningShown := false
+    SessionPlans := Map()
+    try {
+        planLines := IniRead(StateFile, "Plans")
+    } catch {
+        planLines := ""
+    }
+    loop parse planLines, "`n", "`r" {
+        separator := InStr(A_LoopField, "=")
+        if !separator
+            continue
+        values := StrSplit(SubStr(A_LoopField, separator + 1), ",")
+        if values.Length != 6
+            continue
+        SessionPlans[SubStr(A_LoopField, 1, separator - 1)] := {
+            AC: Integer(values[1]), DC: Integer(values[2]),
+            DisplayAC: Integer(values[3]), DisplayDC: Integer(values[4]),
+            LidAC: Integer(values[5]), LidDC: Integer(values[6])}
+    }
     SessionExpiry := IniRead(StateFile, "Session", "Expiry", "")
     SessionLabel := IniRead(StateFile, "Session", "Label", "Indefinitely")
     AsusOptimizationBeforeState := IniRead(
@@ -728,34 +707,18 @@ LoadSession() {
         return
     }
 
-    if !SessionPlan {
-        RestoreNormal(false)
-        return
-    }
-
-    if !CheckSessionPlan(false) {
-        RestoreNormal(false)
-        return
-    }
-
-    if SessionExpiry && DateDiff(SessionExpiry, A_Now, "Seconds") <= 0 {
-        RestoreNormal(false)
-        return
-    }
-
+    ; An interrupted session recovers to Normal sleep rather than resuming.
     if !RestoreNormal(false)
         MsgBox("The interrupted " AppName " session still needs recovery.",
             AppName, "Iconx")
 }
 
 SaveSession() {
-    global SessionActive, SessionPlan, NormalAC, NormalDC
-    global NormalDisplayAC, NormalDisplayDC, NormalLidAC, NormalLidDC
+    global SessionActive, SessionPlans
     global SessionExpiry, SessionLabel
     global AsusOptimizationBeforeState, AsusOptimizationRestoreRequired
     global AsusOptimizationPhase, AsusOptimizationSessionId
     global AsusOptimizationLastError
-    global SessionPlanChanged
 
     tempFile := StateFile ".tmp"
     try {
@@ -766,16 +729,15 @@ SaveSession() {
         else
             FileAppend("", tempFile)
 
+        ; Rewrite both sections whole so keys from older versions and plans
+        ; from an earlier session cannot linger.
+        try IniDelete(tempFile, "Session")
+        try IniDelete(tempFile, "Plans")
         IniWrite(SessionActive ? 1 : 0, tempFile, "Session", "Active")
-        IniWrite(SessionPlan, tempFile, "Session", "Plan")
-        IniWrite(NormalAC, tempFile, "Session", "NormalAC")
-        IniWrite(NormalDC, tempFile, "Session", "NormalDC")
-        IniWrite(NormalDisplayAC, tempFile, "Session", "NormalDisplayAC")
-        IniWrite(NormalDisplayDC, tempFile, "Session", "NormalDisplayDC")
-        IniWrite(NormalLidAC, tempFile, "Session", "NormalLidAC")
-        IniWrite(NormalLidDC, tempFile, "Session", "NormalLidDC")
-        IniWrite(SessionPlanChanged ? 1 : 0,
-            tempFile, "Session", "PlanChanged")
+        for plan, normal in SessionPlans
+            IniWrite(Format("{},{},{},{},{},{}", normal.AC, normal.DC,
+                normal.DisplayAC, normal.DisplayDC, normal.LidAC, normal.LidDC),
+                tempFile, "Plans", plan)
         IniWrite(SessionExpiry, tempFile, "Session", "Expiry")
         IniWrite(SessionLabel, tempFile, "Session", "Label")
         IniWrite(AsusOptimizationBeforeState,
@@ -884,23 +846,16 @@ SavePreferences() {
 }
 
 ToggleKeepDisplayOn(*) {
-    global KeepDisplayOn, SessionActive, SessionPlan
-    global NormalDisplayAC, NormalDisplayDC
+    global KeepDisplayOn, SessionActive, SessionPlans
 
     try {
         enabled := !KeepDisplayOn
         if SessionActive {
-            if !CheckSessionPlan(true)
-                throw Error("The active power plan changed. Select Normal sleep first.")
-            if enabled {
-                SetDisplayValues(SessionPlan, 0, NormalDisplayDC,
-                    SessionPlanActivationAllowed())
-                SetNodeDisplayRequest(true)
-            } else {
-                SetDisplayValues(SessionPlan, NormalDisplayAC, NormalDisplayDC,
-                    SessionPlanActivationAllowed())
-                SetNodeDisplayRequest(false)
-            }
+            for plan, normal in SessionPlans
+                SetDisplayValues(plan, enabled ? 0 : normal.DisplayAC,
+                    normal.DisplayDC)
+            ReapplyActiveScheme()
+            SetNodeDisplayRequest(enabled)
         }
         KeepDisplayOn := enabled
         SavePreferences()
@@ -916,26 +871,25 @@ ToggleKeepDisplayOn(*) {
 }
 
 ToggleKeepAwakeWithLidClosed(*) {
-    global KeepAwakeWithLidClosed
+    global KeepAwakeWithLidClosed, SessionActive, SessionPlans
 
     try {
         enabled := !KeepAwakeWithLidClosed
         if enabled && !SessionActive {
-            values := ReadCurrentPowerValues()
+            values := ReadPowerValues(GetActiveScheme())
             if values.LidAC < 0 || values.LidDC < 0
                 throw Error("This computer does not expose a lid-close setting.")
         }
         if SessionActive {
-            if NormalLidAC < 0 || NormalLidDC < 0
-                throw Error("This computer does not expose a lid-close setting.")
-            if !CheckSessionPlan(true)
-                throw Error("The active power plan changed. Select Normal sleep first.")
-            if enabled
-                SetLidValues(SessionPlan, 0, 0,
-                    SessionPlanActivationAllowed())
-            else
-                SetLidValues(SessionPlan, NormalLidAC, NormalLidDC,
-                    SessionPlanActivationAllowed())
+            for plan, normal in SessionPlans {
+                if normal.LidAC < 0 || normal.LidDC < 0
+                    throw Error("This computer does not expose a lid-close setting.")
+                if enabled
+                    SetLidValues(plan, 0, 0)
+                else
+                    SetLidValues(plan, normal.LidAC, normal.LidDC)
+            }
+            ReapplyActiveScheme()
         }
         KeepAwakeWithLidClosed := enabled
         SavePreferences()
@@ -1262,8 +1216,7 @@ HasArgument(expected) {
     return false
 }
 
-ReadCurrentPowerValues() {
-    plan := GetActiveScheme()
+ReadPowerValues(plan) {
     schemeGuid := GuidBuffer(plan)
     sleepGroupGuid := GuidBuffer("{238c9fa8-0aad-41ed-83f4-97be242c8f20}")
     sleepSettingGuid := GuidBuffer("{29f6c1db-86da-48c5-9fdb-f2b67b1f44da}")
@@ -1283,7 +1236,6 @@ ReadCurrentPowerValues() {
     }
 
     return {
-        Plan: plan,
         AC: ReadPowerValue("PowerReadACValueIndex", schemeGuid,
             sleepGroupGuid, sleepSettingGuid),
         DC: ReadPowerValue("PowerReadDCValueIndex", schemeGuid,
@@ -1298,53 +1250,51 @@ ReadCurrentPowerValues() {
 }
 
 ApplySessionPolicy() {
-    global KeepDisplayOn, SessionPlan, NormalDC
-    global NormalDisplayAC, NormalDisplayDC
-    global KeepAwakeWithLidClosed, NormalLidAC, NormalLidDC
+    global KeepDisplayOn, KeepAwakeWithLidClosed, SessionPlans
 
-    if !CheckSessionPlan(false)
-        throw Error("The active power plan changed. Select Normal sleep first.")
-    activatePlan := SessionPlanActivationAllowed()
-    ; Power requests are the primary protection. The AC sleep-timeout write is a
-    ; fallback for policies or drivers that do not honor a system request.
-    SetSleepValues(SessionPlan, 0, NormalDC, activatePlan)
-    if NormalDisplayAC >= 0 && NormalDisplayDC >= 0 {
-        displayAC := KeepDisplayOn ? 0 : NormalDisplayAC
-        SetDisplayValues(SessionPlan, displayAC, NormalDisplayDC, activatePlan)
+    ; Armoury Crate switches the active plan on its own, including the moment
+    ; AC drops out, and Windows applies the new plan's lid action at once.
+    ; Override every plan so a switch cannot disarm the session.
+    for plan, normal in SessionPlans {
+        ; Power requests are the primary protection. The AC sleep-timeout write
+        ; is a fallback for policies or drivers that do not honor a system request.
+        SetSleepValues(plan, 0, normal.DC)
+        SetDisplayValues(plan, KeepDisplayOn ? 0 : normal.DisplayAC,
+            normal.DisplayDC)
+        ; Override the battery lid action too: when AC drops out with the lid
+        ; closed, Windows applies the DC lid action at once, before the
+        ; AC-removal grace period can decide whether the dropout was transient.
+        if KeepAwakeWithLidClosed {
+            if normal.LidAC < 0 || normal.LidDC < 0
+                throw Error("This computer does not expose a lid-close setting.")
+            SetLidValues(plan, 0, 0)
+        }
     }
-    ; Override the battery lid action too: when AC drops out with the lid
-    ; closed, Windows applies the DC lid action at once, before the AC-removal
-    ; grace period can decide whether the dropout was transient.
-    if KeepAwakeWithLidClosed {
-        if NormalLidAC < 0 || NormalLidDC < 0
-            throw Error("This computer does not expose a lid-close setting.")
-        SetLidValues(SessionPlan, 0, 0, activatePlan)
-    }
+    ReapplyActiveScheme()
 }
 
-SetSleepValues(plan, acSeconds, dcSeconds, activate := true) {
+SetSleepValues(plan, acSeconds, dcSeconds) {
     SetPowerSettingValues(plan,
         "{238c9fa8-0aad-41ed-83f4-97be242c8f20}",
         "{29f6c1db-86da-48c5-9fdb-f2b67b1f44da}",
-        acSeconds, dcSeconds, activate)
+        acSeconds, dcSeconds)
 }
 
-SetDisplayValues(plan, acSeconds, dcSeconds, activate := true) {
+SetDisplayValues(plan, acSeconds, dcSeconds) {
     SetPowerSettingValues(plan,
         "{7516b95f-f776-4464-8c53-06167f40cc99}",
         "{3c0bc021-c8a8-4e07-a973-6b14cbcb2b7e}",
-        acSeconds, dcSeconds, activate)
+        acSeconds, dcSeconds)
 }
 
-SetLidValues(plan, acValue, dcValue, activate := true) {
+SetLidValues(plan, acValue, dcValue) {
     SetPowerSettingValues(plan,
         "{4f971e89-eebd-4455-a8de-9e59040e7347}",
         "{5ca83367-6e45-459f-a27b-476b1d01c936}",
-        acValue, dcValue, activate)
+        acValue, dcValue)
 }
 
-SetPowerSettingValues(plan, groupGuidText, settingGuidText, acValue, dcValue,
-    activate := true) {
+SetPowerSettingValues(plan, groupGuidText, settingGuidText, acValue, dcValue) {
     schemeGuid := GuidBuffer(plan)
     groupGuid := GuidBuffer(groupGuidText)
     settingGuid := GuidBuffer(settingGuidText)
@@ -1352,14 +1302,18 @@ SetPowerSettingValues(plan, groupGuidText, settingGuidText, acValue, dcValue,
         groupGuid, settingGuid, acValue)
     WritePowerValue("PowerWriteDCValueIndex", schemeGuid,
         groupGuid, settingGuid, dcValue)
+}
 
-    if activate {
-        result := DllCall("PowrProf\PowerSetActiveScheme",
-            "Ptr", 0, "Ptr", schemeGuid.Ptr, "UInt")
-        if result
-            throw Error("Windows could not activate the updated power policy ("
-                result ").")
-    }
+; Written values take effect when the active plan is applied again. Apply
+; whichever plan is active now, never a remembered one, so SteepAwake does not
+; switch away from a plan Armoury Crate selected.
+ReapplyActiveScheme() {
+    schemeGuid := GuidBuffer(GetActiveScheme())
+    result := DllCall("PowrProf\PowerSetActiveScheme",
+        "Ptr", 0, "Ptr", schemeGuid.Ptr, "UInt")
+    if result
+        throw Error("Windows could not activate the updated power policy ("
+            result ").")
 }
 
 GetActiveScheme() {
@@ -1371,14 +1325,35 @@ GetActiveScheme() {
             result ").")
 
     try {
-        textBuffer := Buffer(78, 0)
-        if !DllCall("Ole32\StringFromGUID2", "Ptr", schemePointer,
-            "Ptr", textBuffer.Ptr, "Int", 39, "Int")
-            throw Error("Windows returned an invalid power-policy identifier.")
-        return StrGet(textBuffer, "UTF-16")
+        return GuidText(schemePointer)
     } finally {
         DllCall("Kernel32\LocalFree", "Ptr", schemePointer, "Ptr")
     }
+}
+
+PowerSchemes() {
+    schemes := []
+    guidBytes := Buffer(16, 0)
+    loop {
+        size := guidBytes.Size
+        result := DllCall("PowrProf\PowerEnumerate",
+            "Ptr", 0, "Ptr", 0, "Ptr", 0, "UInt", 16,
+            "UInt", A_Index - 1, "Ptr", guidBytes.Ptr, "UInt*", &size, "UInt")
+        ; ERROR_NO_MORE_ITEMS ends the list.
+        if result = 259
+            return schemes
+        if result
+            throw Error("Windows could not list the power plans (" result ").")
+        schemes.Push(GuidText(guidBytes.Ptr))
+    }
+}
+
+GuidText(guidPointer) {
+    textBuffer := Buffer(78, 0)
+    if !DllCall("Ole32\StringFromGUID2", "Ptr", guidPointer,
+        "Ptr", textBuffer.Ptr, "Int", 39, "Int")
+        throw Error("Windows returned an invalid power-policy identifier.")
+    return StrGet(textBuffer, "UTF-16")
 }
 
 GuidBuffer(guidText) {
@@ -1425,7 +1400,7 @@ ExitTrayApp(*) {
 HandleExit(exitReason, exitCode) {
     global SessionActive, TrayShuttingDown
     global TrayReadyEventHandle, TrayShutdownEventHandle
-    global TrayStoppedEventHandle, TrayMutexHandle
+    global TrayStoppedEventHandle, TrayAwakeEventHandle, TrayMutexHandle
 
     if SessionActive && !TrayShuttingDown
         RestoreNormal(false)
@@ -1437,5 +1412,6 @@ HandleExit(exitReason, exitCode) {
     CloseTrayHandle(TrayReadyEventHandle)
     CloseTrayHandle(TrayShutdownEventHandle)
     CloseTrayHandle(TrayStoppedEventHandle)
+    CloseTrayHandle(TrayAwakeEventHandle)
     CloseTrayHandle(TrayMutexHandle)
 }

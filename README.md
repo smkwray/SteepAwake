@@ -28,7 +28,8 @@ to choose 30 minutes, 1 hour, 2 hours, 4 hours, 6 hours, or Indefinitely.
 The same menu contains a **Start with Windows** checkbox. It starts a small
 unelevated launcher, which asks the installed task to start the elevated tray
 component. Normal launches and service transitions do not cause another User
-Account Control prompt.
+Account Control prompt. Scripts can start an indefinite session with
+`SteepAwake.exe --awake`, which starts the tray first if needed.
 
 Two optional checkboxes apply only while an awake session is active:
 
@@ -78,8 +79,8 @@ performed directly by the already-elevated tray process.
 
 When an awake session starts, SteepAwake:
 
-1. reads the active Windows power scheme and saves its plugged-in and battery
-   sleep, display, and lid-close values;
+1. saves the plugged-in and battery sleep, display, and lid-close values of
+   every Windows power plan, then applies its overrides to all of them;
 2. requires AC power, acquires a system-required power request, and optionally
    acquires a display-required request when display protection is enabled;
 3. optionally records and pauses ASUSOptimization, with a durable restore
@@ -90,9 +91,10 @@ When an awake session starts, SteepAwake:
 
 This uses Windows' `PowerCreateRequest` API, so `powercfg /requests` should show
 SteepAwake while an awake session is active. The AC-only timeout fallback and
-lid override are restored when the session ends. If Armoury Crate changes the
-active power plan during a session, SteepAwake ends that session without
-switching back to the old plan.
+lid override are restored when the session ends. The overrides cover every
+plan because tools such as Armoury Crate switch the active plan on their own,
+including the moment AC drops out, and Windows applies the new plan's lid
+action at once. SteepAwake never switches the active plan itself.
 
 SteepAwake also watches AC/DC and console display-state notifications. If AC
 power is still absent one minute after it drops, the session ends and the
@@ -106,8 +108,7 @@ hotkeys from other programs are not modified or intercepted.
 
 SteepAwake does not block manual sleep or change critical-battery actions,
 router behavior, or application/server idle timeouts. The optional display and
-lid settings affect only the active Windows power policy and are restored after
-the awake session.
+lid settings are restored on every power plan after the awake session.
 
 Preferences and the recovery journal are stored in `%LOCALAPPDATA%\SteepAwake`.
 The installer places the launcher and tray component in the protected

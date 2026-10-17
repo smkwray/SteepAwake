@@ -67,8 +67,20 @@ Assert-True ($tray -match 'PowerRequestSystemRequired := 1\b') 'System-required 
 Assert-True ($tray -notmatch 'PowerSetRequest"[^)]*"Int", \d') 'Power requests must use the named POWER_REQUEST_TYPE values.'
 # A charger blip with the lid closed applies the DC lid action immediately, so
 # the lid override must cover battery as well as AC.
-Assert-True ($tray -notmatch 'SetLidValues\(SessionPlan, 0, NormalLidDC') 'Lid override must also set the battery lid action to Do nothing.'
-Assert-True (([regex]::Matches($tray, 'SetLidValues\(SessionPlan, 0, 0')).Count -ge 2) 'Session start and live toggle must both override AC and battery lid actions.'
+Assert-True ($tray -notmatch 'SetLidValues\(plan, 0, normal\.LidDC') 'Lid override must also set the battery lid action to Do nothing.'
+Assert-True (([regex]::Matches($tray, 'SetLidValues\(plan, 0, 0\)')).Count -ge 2) 'Session start and live toggle must both override AC and battery lid actions.'
+# Armoury Crate switches to another plan the moment AC drops out, and Windows
+# applies that plan's lid action at once, so every plan must carry the override.
+Assert-True ($tray -match '(?s)for plan in PowerSchemes\(\)\s+SessionPlans\[plan\] := ReadPowerValues\(plan\)') 'Session start must save the values of every power plan.'
+Assert-True ($tray -match '(?s)ApplySessionPolicy\(\) \{.*?for plan, normal in SessionPlans.*?SetLidValues\(plan, 0, 0\)') 'The session policy must override every saved plan.'
+Assert-True ($tray -match '(?s)RestoreNormal\(showNotice := false\) \{.*?for plan, normal in SessionPlans.*?SetLidValues\(plan, normal\.LidAC, normal\.LidDC\)') 'Ending the session must restore every saved plan.'
+Assert-True ($tray -match '(?s)CheckExpiration\(\) \{.*?CoverActivePlan\(\)') 'A plan created during the session must be covered when it becomes active.'
+# Reactivating a remembered plan would undo the mode Armoury Crate selected.
+Assert-True (([regex]::Matches($tray, 'PowerSetActiveScheme')).Count -eq 1) 'Only ReapplyActiveScheme may activate a power plan.'
+Assert-True ($tray -match '(?s)ReapplyActiveScheme\(\) \{\s+schemeGuid := GuidBuffer\(GetActiveScheme\(\)\)') 'Policy changes must reapply the plan that is active now.'
+# The unelevated launcher can start a session only if the tray grants the user the event.
+Assert-True ($tray -match 'SteepAwake\.Tray\.Awake\." TraySid,\s+"D:[^"]*\(A;;0x100002;;;" TraySid') 'The awake event must grant the user signal access.'
+Assert-True ($launcher -match '(?s)HasArgument\("--awake"\).*?SignalTrayAwake') 'Launcher --awake must signal the tray.'
 # GUID_ACDC_POWER_SOURCE is 0 for AC; act only after AC stays absent.
 Assert-True ($tray -match 'powerSource != 0') 'AC/DC notification must treat 0 as AC.'
 Assert-True ($tray -match 'SetTimer\(EndSessionAfterACRemoval, -ACRemovalGraceMs\)') 'AC removal must wait out transient charger dropouts.'
